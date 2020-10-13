@@ -236,13 +236,6 @@ void UDPSocket::joinGroup(const char* groupname, const char* if_addr)
 #ifdef CYGWIN_BUILD	
     throw runtime_error(string("UDPSocket::joinGroup()  NOT SUPPORTED IN CYGWIN BUILD"));
 #else
-    struct ip_mreqn {
-               struct in_addr imr_multiaddr; /* IP multicast group
-                                                address */
-               struct in_addr imr_address;   /* IP address of local
-                                                interface */
-               int            imr_ifindex;   /* interface index */
-           };
     ip_mreqn group;
     if ((group.imr_multiaddr.s_addr = inet_addr(groupname)) == INADDR_NONE) {
         throw runtime_error("Cannot convert multicast group name");
