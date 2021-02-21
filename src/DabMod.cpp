@@ -600,10 +600,15 @@ static run_modulator_state_t run_modulator(modulator_data& m)
             else {
                 etiLog.level(info) << "ETI FCT discontinuity, expected " <<
                     expected_fct << " received " << fct;
-                if (m.ediInput) {
-                    m.ediInput->ediReader.clearFrame();
-                }
-                return run_modulator_state_t::again;
+
+                last_eti_fct = fct;
+                m.framecount++;
+                m.flowgraph->run();
+
+//                if (m.ediInput) {
+//                    m.ediInput->ediReader.clearFrame();
+//                }
+//                return run_modulator_state_t::again;
             }
 
             if (m.ediInput) {
