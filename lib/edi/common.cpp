@@ -1,5 +1,5 @@
 /*
-   Copyright (C) 2019
+   Copyright (C) 2020
    Matthias P. Braendli, matthias.braendli@mpb.li
 
    http://opendigitalradio.org
@@ -22,10 +22,12 @@
 #include "buffer_unpack.hpp"
 #include "Log.h"
 #include "crc.h"
+#include <algorithm>
 #include <sstream>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
 
 namespace EdiDecoder {
 
@@ -66,7 +68,7 @@ time_t frame_timestamp_t::to_unix_epoch() const
     return 946684800 + seconds - utco;
 }
 
-double frame_timestamp_t::diff_ms(const frame_timestamp_t& other) const
+double frame_timestamp_t::diff_s(const frame_timestamp_t& other) const
 {
     const double lhs = (double)seconds + (tsta / 16384000.0);
     const double rhs = (double)other.seconds + (other.tsta / 16384000.0);
@@ -111,16 +113,42 @@ std::chrono::system_clock::time_point frame_timestamp_t::to_system_clock() const
     return ts;
 }
 
+std::string tag_name_to_human_readable(const tag_name_t& name)
+{
+    std::string s;
+    for (const uint8_t c : name) {
+        if (isprint(c)) {
+            s += (char)c;
+        }
+        else {
+            char escaped[5];
+            snprintf(escaped, 5, "\\x%02x", c);
+            s += escaped;
+        }
+    }
+    return s;
+}
 
 TagDispatcher::TagDispatcher(
-        std::function<void()>&& af_packet_completed, bool verbose) :
-    m_af_packet_completed(move(af_packet_completed))
+        std::function<void()>&& af_packet_completed) :
+    m_af_packet_completed(move(af_packet_completed)),
+    m_tagpacket_handler([](const std::vector<uint8_t>& ignore){})
+{
+}
+
+void TagDispatcher::set_verbose(bool verbose)
 {
     m_pft.setVerbose(verbose);
 }
 
 void TagDispatcher::push_bytes(const vector<uint8_t> &buf)
 {
+    if (buf.empty()) {
+        m_input_data.clear();
+        m_last_seq_valid = false;
+        return;
+    }
+
     copy(buf.begin(), buf.end(), back_inserter(m_input_data));
 
     while (m_input_data.size() > 2) {
@@ -173,14 +201,16 @@ void TagDispatcher::push_bytes(const vector<uint8_t> &buf)
             }
         }
         else {
-            etiLog.log(warn,"Unknown %c!", *m_input_data.data());
+            etiLog.log(warn, "Unknown 0x%02x!", *m_input_data.data());
             m_input_data.erase(m_input_data.begin());
         }
     }
 }
 
-void TagDispatcher::push_packet(const vector<uint8_t> &buf)
+void TagDispatcher::push_packet(const Packet &packet)
 {
+    auto& buf = packet.buf;
+
     if (buf.size() < 2) {
         throw std::invalid_argument("Not enough bytes to read EDI packet header");
     }
@@ -195,7 +225,7 @@ void TagDispatcher::push_packet(const vector<uint8_t> &buf)
     }
     else if (buf[0] == 'P' and buf[1] == 'F') {
         PFT::Fragment fragment;
-        fragment.loadData(buf);
+        fragment.loadData(buf, packet.received_on_port);
 
         if (fragment.isValid()) {
             m_pft.pushPFTFrag(fragment);
@@ -211,11 +241,10 @@ void TagDispatcher::push_packet(const vector<uint8_t> &buf)
         }
     }
     else {
-        const char packettype[3] = {(char)buf[0], (char)buf[1], '\0'};
         std::stringstream ss;
-        ss << "Unknown EDI packet ";
-        ss << packettype;
-        throw std::invalid_argument(ss.str());
+        ss << "Unknown EDI packet " << std::hex << (int)buf[0] << " " << (int)buf[1];
+        m_ignored_tags.clear();
+        throw invalid_argument(ss.str());
     }
 }
 
@@ -243,9 +272,16 @@ decode_state_t TagDispatcher::decode_afpacket(
     }
 
     // SEQ wraps at 0xFFFF, unsigned integer overflow is intentional
-    const uint16_t expected_seq = m_last_seq + 1;
-    if (expected_seq != seq) {
-        etiLog.level(warn) << "EDI AF Packet sequence error, " << seq;
+    if (m_last_seq_valid) {
+        const uint16_t expected_seq = m_last_seq + 1;
+        if (expected_seq != seq) {
+            etiLog.level(warn) << "EDI AF Packet sequence error, " << seq;
+            m_ignored_tags.clear();
+        }
+    }
+    else {
+        etiLog.level(info) << "EDI AF Packet initial sequence number: " << seq;
+        m_last_seq_valid = true;
     }
     m_last_seq = seq;
 
@@ -276,8 +312,7 @@ decode_state_t TagDispatcher::decode_afpacket(
     uint16_t packet_crc = read_16b(input_data.begin() + AFPACKET_HEADER_LEN + taglength);
 
     if (packet_crc != crc) {
-        throw invalid_argument(
-                "AF Packet crc wrong");
+        throw invalid_argument("AF Packet crc wrong");
     }
     else {
         vector<uint8_t> payload(taglength);
@@ -293,6 +328,11 @@ decode_state_t TagDispatcher::decode_afpacket(
 void TagDispatcher::register_tag(const std::string& tag, tag_handler&& h)
 {
     m_handlers[tag] = move(h);
+}
+
+void TagDispatcher::register_tagpacket_handler(tagpacket_handler&& h)
+{
+    m_tagpacket_handler = move(h);
 }
 
 
@@ -326,36 +366,31 @@ bool TagDispatcher::decode_tagpacket(const vector<uint8_t> &payload)
             break;
         }
 
+        const array<uint8_t, 4> tag_name({
+               (uint8_t)tag_sz[0], (uint8_t)tag_sz[1], (uint8_t)tag_sz[2], (uint8_t)tag_sz[3]
+               });
         vector<uint8_t> tag_value(taglength);
         copy(   payload.begin() + i+8,
                 payload.begin() + i+8+taglength,
                 tag_value.begin());
 
-        bool tagsuccess = false;
+        bool tagsuccess = true;
         bool found = false;
         for (auto tag_handler : m_handlers) {
-            if (tag_handler.first.size() == 4 and tag_handler.first == tag) {
+            if (    (tag_handler.first.size() == 4 and tag == tag_handler.first) or
+                    (tag_handler.first.size() == 3 and tag.substr(0, 3) == tag_handler.first) or
+                    (tag_handler.first.size() == 2 and tag.substr(0, 2) == tag_handler.first) or
+                    (tag_handler.first.size() == 1 and tag.substr(0, 1) == tag_handler.first)) {
                 found = true;
-                tagsuccess = tag_handler.second(tag_value, 0);
-            }
-            else if (tag_handler.first.size() == 3 and
-                    tag.substr(0, 3) == tag_handler.first) {
-                found = true;
-                uint8_t n = tag_sz[3];
-                tagsuccess = tag_handler.second(tag_value, n);
-            }
-            else if (tag_handler.first.size() == 2 and
-                    tag.substr(0, 2) == tag_handler.first) {
-                found = true;
-                uint16_t n = 0;
-                n = (uint16_t)(tag_sz[2]) << 8;
-                n |= (uint16_t)(tag_sz[3]);
-                tagsuccess = tag_handler.second(tag_value, n);
+                tagsuccess &= tag_handler.second(tag_value, tag_name);
             }
         }
 
         if (not found) {
-            etiLog.log(warn, "Ignoring unknown TAG %s", tag.c_str());
+            if (std::find(m_ignored_tags.begin(), m_ignored_tags.end(), tag) == m_ignored_tags.end()) {
+                etiLog.log(warn, "Ignoring unknown TAG %s", tag.c_str());
+                m_ignored_tags.push_back(tag);
+            }
             break;
         }
 
@@ -365,6 +400,8 @@ bool TagDispatcher::decode_tagpacket(const vector<uint8_t> &payload)
             break;
         }
     }
+
+    m_tagpacket_handler(payload);
 
     return success;
 }

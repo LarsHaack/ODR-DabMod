@@ -19,7 +19,7 @@
 # along with ODR-DabMod.  If not, see <http://www.gnu.org/licenses/>.
 
 AC_PREREQ(2.69)
-AC_INIT([ODR-DabMod], [2.4.1], [matthias.braendli@mpb.li])
+AC_INIT([ODR-DabMod], [2.4.2], [matthias.braendli@mpb.li])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CANONICAL_SYSTEM
@@ -34,7 +34,7 @@ AC_PROG_CC
 AM_PROG_CC_C_O
 AC_PROG_INSTALL
 
-AX_CXX_COMPILE_STDCXX_11(noext,mandatory)
+AX_CXX_COMPILE_STDCXX(11,noext,mandatory)
 
 EXTRA=""
 AC_ARG_ENABLE([prof],
