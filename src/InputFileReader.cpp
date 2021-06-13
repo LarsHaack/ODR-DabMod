@@ -63,6 +63,32 @@ int InputFileReader::Rewind()
     return IdentifyType();
 }
 
+bool InputFileReader::IsSyncValid(uint32_t sync)
+{
+	// Check SYNC (FSYNC and ERR)
+	
+    uint32_t fsync = sync & 0xffffff00;	
+	uint8_t  err   = sync & 0x000000ff;
+	bool ret = false;
+	
+    if ( (fsync == 0x49c5f800) || (fsync == 0xb63a0700) )
+	{
+#ifdef CFG_IGNORE_SYNC_ERRORS
+		if ( (err==0xff) || (err==0xf0) || (err==0x0f) || (err==0x00) )     // Allow all error levels
+		{
+			ret = true;
+        }		
+#else
+		if ( (err==0xff) )     // Allow no errors
+		{
+			ret = true;
+        }		
+#endif
+	}
+	
+	return ret;;
+}
+
 int InputFileReader::IdentifyType()
 {
     EtiStreamType streamType = EtiStreamType::None;
@@ -82,7 +108,7 @@ int InputFileReader::IdentifyType()
         perror(filename_.c_str());
         return -1;
     }
-    if ((sync == 0x49c5f8ff) || (sync == 0xb63a07ff)) {
+    if (IsSyncValid(sync)) {
         streamType = EtiStreamType::Raw;
         if (inputfilelength_ > 0) {
             nbframes_ = inputfilelength_ / 6144;
@@ -113,7 +139,7 @@ int InputFileReader::IdentifyType()
     sync &= 0xffff;
     sync |= ((uint32_t)frameSize) << 16;
 
-    if ((sync == 0x49c5f8ff) || (sync == 0xb63a07ff)) {
+    if (IsSyncValid(sync)) {
         streamType = EtiStreamType::Streamed;
         frameSize = nbFrames & 0xffff;
         if (inputfilelength_ > 0) {
@@ -140,7 +166,7 @@ int InputFileReader::IdentifyType()
         perror(filename_.c_str());
         return -1;
     }
-    if ((sync == 0x49c5f8ff) || (sync == 0xb63a07ff)) {
+    if (IsSyncValid(sync)) {
         streamType = EtiStreamType::Framed;
         if (fseek(inputfile_.get(), -6, SEEK_CUR) != 0) {
             // if the seek fails, consume the rest of the frame
@@ -165,7 +191,7 @@ int InputFileReader::IdentifyType()
             perror(filename_.c_str());
             return -1;
         }
-        if ((sync == 0x49c5f8ff) || (sync == 0xb63a07ff)) {
+        if (IsSyncValid(sync)) {
             streamType = EtiStreamType::Raw;
             if (inputfilelength_ > 0) {
                 nbframes_ = (inputfilelength_ - i) / 6144;
@@ -253,9 +279,16 @@ int InputFileReader::GetNextFrame(void* buffer)
 
     PDEBUG("Frame size: %u\n", frameSize);
     size_t read_bytes = fread(buffer, 1, frameSize, inputfile_.get());
+#ifdef CFG_IGNORE_INCOMPLETE_FRAMES
+    // In case an incomplete frame is read, try to rewind
+    if (    loop_ &&
+            streamtype_ == EtiStreamType::Raw && //implies frameSize == 6144
+            read_bytes != frameSize && feof(inputfile_.get())) {
+#else
     if (    loop_ &&
             streamtype_ == EtiStreamType::Raw && //implies frameSize == 6144
             read_bytes == 0 && feof(inputfile_.get())) {
+#endif				
         // in case of an EOF from a RAW that we loop, rewind
         // otherwise, we won't tolerate it
 
@@ -268,7 +301,6 @@ int InputFileReader::GetNextFrame(void* buffer)
             return -1;
         }
     }
-
 
     if (read_bytes != frameSize) {
         // A short read of a frame (i.e. reading an incomplete frame)

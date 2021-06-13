@@ -75,6 +75,7 @@ class InputFileReader : public InputReader
         virtual int GetNextFrame(void* buffer) override;
 
     private:
+        bool IsSyncValid(uint32_t sync);
         int IdentifyType();
 
         // Rewind the file, and replay anew
