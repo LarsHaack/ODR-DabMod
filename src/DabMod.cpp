@@ -699,10 +699,15 @@ static run_modulator_state_t run_modulator(const mod_settings_t& mod_settings, M
                     else {
                         etiLog.level(warn) << "ETI FCT discontinuity, expected " <<
                             expected_fct << " received " << fct;
+
+#ifdef CFG_IGNORE_FCT_DISCONTINUITY
+                        last_eti_fct = fct;
+#else
                         if (m.ediInput) {
                             m.ediInput->ediReader.clearFrame();
                         }
                         return run_modulator_state_t::again;
+#endif
                     }
                 }
 
@@ -710,24 +715,6 @@ static run_modulator_state_t run_modulator(const mod_settings_t& mod_settings, M
                     m.framecount++;
                     m.flowgraph->run();
                 }
-            }
-            else if (fct == expected_fct) {
-                last_eti_fct = fct;
-                m.framecount++;
-                m.flowgraph->run();
-            }
-            else {
-                etiLog.level(info) << "ETI FCT discontinuity, expected " <<
-                    expected_fct << " received " << fct;
-
-                last_eti_fct = fct;
-                m.framecount++;
-                m.flowgraph->run();
-
-//                if (m.ediInput) {
-//                    m.ediInput->ediReader.clearFrame();
-//                }
-//                return run_modulator_state_t::again;
             }
 
             if (m.ediInput) {

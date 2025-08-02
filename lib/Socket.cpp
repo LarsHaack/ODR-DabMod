@@ -354,7 +354,7 @@ void UDPSocket::send(const std::string& data, InetAddress destination)
 
 void UDPSocket::join_group(const char* groupname, const char* if_addr)
 {
-#ifdef CYGWIN_BUILD	
+#ifdef CYGWIN_BUILD
     throw runtime_error(string("UDPSocket::joinGroup()  NOT SUPPORTED IN CYGWIN BUILD"));
 #else
     ip_mreqn group;
@@ -376,7 +376,7 @@ void UDPSocket::join_group(const char* groupname, const char* if_addr)
             == SOCKET_ERROR) {
         throw runtime_error(string("Can't join multicast group: ") + strerror(errno));
     }
-#endif	
+#endif
 }
 
 void UDPSocket::setMulticastSource(const char* source_addr)
