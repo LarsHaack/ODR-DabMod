@@ -32,12 +32,14 @@
 
 namespace EdiDecoder {
 
+constexpr size_t AFPACKET_HEADER_LEN = 10; // includes SYNC
+
 struct frame_timestamp_t {
     uint32_t seconds = 0;
     uint32_t utco = 0;
-    uint32_t tsta = 0; // According to EN 300 797 Annex B
+    uint32_t tsta = 0xFFFFFF; // According to EN 300 797 Annex B
 
-    bool valid() const;
+    bool is_valid() const;
     std::string to_string() const;
     std::time_t to_unix_epoch() const;
     std::chrono::system_clock::time_point to_system_clock() const;
@@ -47,13 +49,33 @@ struct frame_timestamp_t {
     frame_timestamp_t& operator+=(const std::chrono::milliseconds& ms);
 
     static frame_timestamp_t from_unix_epoch(std::time_t time, uint32_t tai_utc_offset, uint32_t tsta);
-};
 
-struct decode_state_t {
-    decode_state_t(bool _complete, size_t _num_bytes_consumed) :
-        complete(_complete), num_bytes_consumed(_num_bytes_consumed) {}
-    bool complete;
-    size_t num_bytes_consumed;
+    friend bool operator==(const frame_timestamp_t& l, const frame_timestamp_t& r) {
+        return (l.seconds - l.utco) == (r.seconds - r.utco) and l.tsta == r.tsta;
+    }
+
+    friend bool operator!=(const frame_timestamp_t& l, const frame_timestamp_t& r) {
+        return not (l == r);
+    }
+
+    friend bool operator< (const frame_timestamp_t& l, const frame_timestamp_t& r) {
+        if (l.seconds - l.utco == r.seconds - r.utco) {
+            return l.tsta < r.tsta;
+        }
+        return l.seconds - l.utco < r.seconds - r.utco;
+    }
+
+    friend bool operator<= (const frame_timestamp_t& l, const frame_timestamp_t& r) {
+        return l < r or l == r;
+    }
+
+    friend bool operator> (const frame_timestamp_t& l, const frame_timestamp_t& r) {
+        return r < l;
+    }
+
+    friend bool operator>= (const frame_timestamp_t& l, const frame_timestamp_t& r) {
+        return l > r or l == r;
+    }
 };
 
 using tag_name_t = std::array<uint8_t, 4>;
@@ -66,6 +88,13 @@ struct Packet {
 
     Packet(std::vector<uint8_t>&& b) : buf(b), received_on_port(0) { }
     Packet() {}
+};
+
+struct seq_info_t {
+    bool seq_valid = false;
+    uint16_t seq = 0;
+    bool pseq_valid = false;
+    uint16_t pseq = 0;
 };
 
 /* The TagDispatcher takes care of decoding EDI, with or without PFT, and
@@ -106,21 +135,34 @@ class TagDispatcher {
          */
         void register_tag(const std::string& tag, tag_handler&& h);
 
-        /* The complete tagpacket can also be retrieved */
-        using tagpacket_handler = std::function<void(const std::vector<uint8_t>&)>;
-        void register_tagpacket_handler(tagpacket_handler&& h);
+        /* The complete AF packet can also be retrieved */
+        using afpacket_handler = std::function<void(std::vector<uint8_t>&&)>;
+        void register_afpacket_handler(afpacket_handler&& h);
+
+        seq_info_t get_seq_info() const {
+            return m_last_sequences;
+        }
 
     private:
-        decode_state_t decode_afpacket(const std::vector<uint8_t> &input_data);
+        enum class decode_state_e {
+            Ok, MissingData, Error
+        };
+        struct decode_result_t {
+            decode_result_t(decode_state_e _st, size_t _num_bytes_consumed) :
+                st(_st), num_bytes_consumed(_num_bytes_consumed) {}
+            decode_state_e st;
+            size_t num_bytes_consumed;
+        };
+
+        decode_result_t decode_afpacket(const std::vector<uint8_t> &input_data);
         bool decode_tagpacket(const std::vector<uint8_t> &payload);
 
         PFT::PFT m_pft;
-        bool m_last_seq_valid = false;
-        uint16_t m_last_seq = 0;
+        seq_info_t m_last_sequences;
         std::vector<uint8_t> m_input_data;
         std::map<std::string, tag_handler> m_handlers;
         std::function<void()> m_af_packet_completed;
-        tagpacket_handler m_tagpacket_handler;
+        afpacket_handler m_afpacket_handler;
 
         std::vector<std::string> m_ignored_tags;
 };

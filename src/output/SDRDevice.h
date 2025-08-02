@@ -2,7 +2,7 @@
    Copyright (C) 2005, 2006, 2007, 2008, 2009, 2010 Her Majesty the
    Queen in Right of Canada (Communications Research Center Canada)
 
-   Copyright (C) 2019
+   Copyright (C) 2023
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -38,6 +38,7 @@ DESCRIPTION:
 #include <string>
 #include <vector>
 #include <complex>
+#include <optional>
 
 #include "TimestampDecoder.h"
 
@@ -56,6 +57,8 @@ struct SDRDeviceConfig {
     std::string tx_antenna;
     std::string rx_antenna;
 
+    bool fixedPoint = false;
+
     long masterClockRate = 32768000;
     unsigned sampleRate = 2048000;
     double frequency = 0.0;
@@ -72,7 +75,8 @@ struct SDRDeviceConfig {
     unsigned dabMode = 0;
     unsigned maxGPSHoldoverTime = 0;
 
-    /* allowed values for UHD : auto, int, sma, mimo */
+    /* allowed values for UHD      : auto, int, sma, mimo */
+    /* allowed values for BladeRF  : pps, 10mhz */
     std::string refclk_src;
 
     /* allowed values for UHD : int, sma, mimo */
@@ -97,32 +101,25 @@ struct SDRDeviceConfig {
 struct FrameData {
     // Buffer holding frame data
     std::vector<uint8_t> buf;
+    size_t sampleSize = sizeof(complexf);
 
     // A full timestamp contains a TIST according to standard
     // and time information within MNSC with tx_second.
-    struct frame_timestamp ts;
+    frame_timestamp ts;
 };
 
 
 // All SDR Devices must implement the SDRDevice interface
 class SDRDevice {
     public:
-        struct RunStatistics {
-            size_t num_underruns = 0;
-            size_t num_late_packets = 0;
-            size_t num_overruns = 0;
-            size_t num_frames_modulated = 0;
-
-            int gpsdo_num_sv = 0;
-            bool gpsdo_holdover = false;
-        };
+        using run_statistics_t = json::map_t;
 
         virtual void tune(double lo_offset, double frequency) = 0;
         virtual double get_tx_freq(void) const = 0;
         virtual void set_txgain(double txgain) = 0;
         virtual double get_txgain(void) const = 0;
-        virtual void transmit_frame(const struct FrameData& frame) = 0;
-        virtual RunStatistics get_run_statistics(void) const = 0;
+        virtual void transmit_frame(struct FrameData&& frame) = 0;
+        virtual run_statistics_t get_run_statistics(void) const = 0;
         virtual double get_real_secs(void) const = 0;
         virtual void set_rxgain(double rxgain) = 0;
         virtual double get_rxgain(void) const = 0;
@@ -131,16 +128,21 @@ class SDRDevice {
         virtual size_t receive_frame(
                 complexf *buf,
                 size_t num_samples,
-                struct frame_timestamp& ts,
+                frame_timestamp& ts,
                 double timeout_secs) = 0;
 
-        // Returns device temperature in degrees C or NaN if not available
-        virtual double get_temperature(void) const = 0;
+        // Returns device temperature in degrees C
+        virtual std::optional<double> get_temperature(void) const = 0;
 
         // Return true if GPS and reference clock inputs are ok
-        virtual bool is_clk_source_ok(void) const = 0;
+        virtual bool is_clk_source_ok(void) = 0;
 
         virtual const char* device_name(void) const = 0;
+
+        virtual void require_timestamp_refresh() { m_require_timestamp_refresh = true; }
+
+    protected:
+        bool m_require_timestamp_refresh = false;
 };
 
 } // namespace Output

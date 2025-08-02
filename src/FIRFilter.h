@@ -2,7 +2,7 @@
    Copyright (C) 2007, 2008, 2009, 2010, 2011 Her Majesty the Queen in
    Right of Canada (Communications Research Center Canada)
 
-   Copyright (C) 2017
+   Copyright (C) 2023
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -33,20 +33,13 @@
 
 #include "RemoteControl.h"
 #include "ModPlugin.h"
-#include "PcDebug.h"
 
 #include <sys/types.h>
-#include <complex>
-#include <thread>
 #include <vector>
-#include <time.h>
 #include <cstdio>
 #include <string>
-#include <memory>
 
 #define FIRFILTER_PIPELINE_DELAY 1
-
-typedef std::complex<float> complexf;
 
 class FIRFilter : public PipelinedModCodec, public RemoteControllable
 {
@@ -59,11 +52,9 @@ public:
     const char* name() override { return "FIRFilter"; }
 
     /******* REMOTE CONTROL ********/
-    virtual void set_parameter(const std::string& parameter,
-            const std::string& value) override;
-
-    virtual const std::string get_parameter(
-            const std::string& parameter) const override;
+    virtual void set_parameter(const std::string& parameter, const std::string& value) override;
+    virtual const std::string get_parameter(const std::string& parameter) const override;
+    virtual const json::map_t get_all_values() const override;
 
 protected:
     virtual int internal_process(Buffer* const dataIn, Buffer* dataOut) override;

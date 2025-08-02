@@ -3,7 +3,7 @@
    Her Majesty the Queen in Right of Canada (Communications Research
    Center Canada)
 
-   Copyright (C) 2018
+   Copyright (C) 2023
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -37,8 +37,7 @@
 #include "ConfigParser.h"
 #include "Utils.h"
 #include "Log.h"
-#include "DabModulator.h"
-#include "output/SDR.h"
+#include "Events.h"
 
 
 using namespace std;
@@ -64,6 +63,27 @@ static GainMode parse_gainmode(const std::string &gainMode_setting)
     throw std::runtime_error("Configuration error");
 }
 
+static FFTEngine parse_fft_engine(const std::string &fft_engine_setting)
+{
+    string fft_engine_minuscule(fft_engine_setting);
+    std::transform(fft_engine_minuscule.begin(), fft_engine_minuscule.end(),
+            fft_engine_minuscule.begin(), ::tolower);
+
+    if (fft_engine_minuscule == "fftw") {
+        return FFTEngine::FFTW;
+    }
+    else if (fft_engine_minuscule == "kiss") {
+        return FFTEngine::KISS;
+    }
+    else if (fft_engine_minuscule == "dexter") {
+        return FFTEngine::DEXTER;
+    }
+
+    cerr << "Modulator fft_engine setting '" << fft_engine_setting <<
+        "' not recognised." << endl;
+    throw std::runtime_error("Configuration error");
+}
+
 static void parse_configfile(
         const std::string& configuration_file,
         mod_settings_t& mod_settings)
@@ -78,6 +98,8 @@ static void parse_configfile(
         std::cerr << "At line:       " << line_err << std::endl;
         throw std::runtime_error("Cannot read configuration file");
     }
+
+    mod_settings.startupCheck = pt.Get("general.startupcheck", "");
 
     // remote controller interfaces:
     if (pt.GetInteger("remotecontrol.telnet", 0) == 1) {
@@ -113,14 +135,21 @@ static void parse_configfile(
     }
 
     mod_settings.inputTransport = pt.Get("input.transport", "file");
-    mod_settings.inputMaxFramesQueued = pt.GetInteger("input.max_frames_queued",
-            ZMQ_INPUT_MAX_FRAME_QUEUE);
 
-    mod_settings.edi_max_delay_ms = pt.GetReal("input.edi_max_delay", 0.0f);
+    mod_settings.edi_max_delay_ms = pt.GetReal("input.edi_max_delay", 0.0);
 
     mod_settings.inputName = pt.Get("input.source", "/dev/stdin");
 
     // log parameters:
+    const string events_endpoint = pt.Get("log.events_endpoint", "");
+    if (not events_endpoint.empty()) {
+#if defined(HAVE_ZEROMQ)
+        events.bind(events_endpoint);
+#else
+        throw std::runtime_error("Cannot configure events sender when compiled without zeromq");
+#endif
+    }
+
     if (pt.GetInteger("log.syslog", 0) == 1) {
         etiLog.register_backend(make_shared<LogToSyslog>());
     }
@@ -148,6 +177,9 @@ static void parse_configfile(
             mod_settings.showProcessTime);
 
     // modulator parameters:
+    const string fft_engine_setting = pt.Get("modulator.fft_engine", "fftw");
+    mod_settings.fftEngine = parse_fft_engine(fft_engine_setting);
+
     const string gainMode_setting = pt.Get("modulator.gainmode", "var");
     mod_settings.gainMode = parse_gainmode(gainMode_setting);
     mod_settings.gainmodeVariance = pt.GetReal("modulator.normalise_variance",
@@ -247,7 +279,7 @@ static void parse_configfile(
             throw std::runtime_error("Configuration error");
         }
         else if (sdr_device_config.frequency == 0) {
-            sdr_device_config.frequency = parseChannel(chan);
+            sdr_device_config.frequency = parse_channel(chan);
         }
         else if (sdr_device_config.frequency != 0 && chan != "") {
             std::cerr << "       UHD output: cannot define both frequency and channel.\n";
@@ -280,7 +312,8 @@ static void parse_configfile(
         mod_settings.sdr_device_config = sdr_device_config;
         mod_settings.useUHDOutput = true;
     }
-#endif
+#endif // defined(HAVE_OUTPUT_UHD)
+
 #if defined(HAVE_SOAPYSDR)
     else if (output_selected == "soapysdr") {
         auto& outputsoapy_conf = mod_settings.sdr_device_config;
@@ -300,7 +333,7 @@ static void parse_configfile(
             throw std::runtime_error("Configuration error");
         }
         else if (outputsoapy_conf.frequency == 0) {
-            outputsoapy_conf.frequency =  parseChannel(chan);
+            outputsoapy_conf.frequency = parse_channel(chan);
         }
         else if (outputsoapy_conf.frequency != 0 && chan != "") {
             std::cerr << "       soapy output: cannot define both frequency and channel.\n";
@@ -311,7 +344,34 @@ static void parse_configfile(
 
         mod_settings.useSoapyOutput = true;
     }
-#endif
+#endif // defined(HAVE_SOAPYSDR)
+
+#if defined(HAVE_DEXTER)
+    else if (output_selected == "dexter") {
+        auto& outputdexter_conf = mod_settings.sdr_device_config;
+        outputdexter_conf.txgain = pt.GetReal("dexteroutput.txgain", 0.0);
+        outputdexter_conf.lo_offset = pt.GetReal("dexteroutput.lo_offset", 0.0);
+        outputdexter_conf.frequency = pt.GetReal("dexteroutput.frequency", 0);
+        std::string chan = pt.Get("dexteroutput.channel", "");
+        outputdexter_conf.dabMode = mod_settings.dabMode;
+        outputdexter_conf.maxGPSHoldoverTime = pt.GetInteger("dexteroutput.max_gps_holdover_time", 0);
+
+        if (outputdexter_conf.frequency == 0 && chan == "") {
+            std::cerr << "       dexter output enabled, but neither frequency nor channel defined.\n";
+            throw std::runtime_error("Configuration error");
+        }
+        else if (outputdexter_conf.frequency == 0) {
+            outputdexter_conf.frequency = parse_channel(chan);
+        }
+        else if (outputdexter_conf.frequency != 0 && chan != "") {
+            std::cerr << "       dexter output: cannot define both frequency and channel.\n";
+            throw std::runtime_error("Configuration error");
+        }
+
+        mod_settings.useDexterOutput = true;
+    }
+#endif // defined(HAVE_DEXTER)
+
 #if defined(HAVE_LIMESDR)
     else if (output_selected == "limesdr") {
         auto& outputlime_conf = mod_settings.sdr_device_config;
@@ -330,7 +390,7 @@ static void parse_configfile(
             throw std::runtime_error("Configuration error");
         }
         else if (outputlime_conf.frequency == 0) {
-            outputlime_conf.frequency =  parseChannel(chan);
+            outputlime_conf.frequency = parse_channel(chan);
         }
         else if (outputlime_conf.frequency != 0 && chan != "") {
             std::cerr << "       Lime output: cannot define both frequency and channel.\n";
@@ -341,7 +401,37 @@ static void parse_configfile(
 
         mod_settings.useLimeOutput = true;
     }
-#endif
+#endif // defined(HAVE_LIMESDR)
+
+#if defined(HAVE_BLADERF)
+    else if (output_selected == "bladerf") {
+        auto& outputbladerf_conf = mod_settings.sdr_device_config;
+        outputbladerf_conf.device = pt.Get("bladerfoutput.device", "");
+        outputbladerf_conf.refclk_src = pt.Get("bladerfoutput.refclk_source", "");
+        outputbladerf_conf.txgain = pt.GetReal("bladerfoutput.txgain", 0.0);
+        outputbladerf_conf.frequency = pt.GetReal("bladerfoutput.frequency", 0);
+        outputbladerf_conf.bandwidth = pt.GetReal("bladerfoutput.bandwidth", 0);
+        std::string chan = pt.Get("bladerfoutput.channel", "");
+        outputbladerf_conf.dabMode = mod_settings.dabMode;
+
+        if (outputbladerf_conf.frequency == 0 && chan == "") {
+            std::cerr << "       BladeRF output enabled, but neither frequency nor channel defined.\n";
+            throw std::runtime_error("Configuration error");
+        }
+        else if (outputbladerf_conf.frequency == 0) {
+            outputbladerf_conf.frequency = parse_channel(chan);
+        }
+        else if (outputbladerf_conf.frequency != 0 && chan != "") {
+            std::cerr << "       BladeRF output: cannot define both frequency and channel.\n";
+            throw std::runtime_error("Configuration error");
+        }
+
+        outputbladerf_conf.dpdFeedbackServerPort = pt.GetInteger("bladerfoutput.dpd_port", 0);
+
+        mod_settings.useBladeRFOutput = true;
+    }
+#endif // defined(HAVE_BLADERF)
+
 #if defined(HAVE_ZEROMQ)
     else if (output_selected == "zmq") {
         mod_settings.outputName = pt.Get("zmqoutput.listen", "");
@@ -354,7 +444,8 @@ static void parse_configfile(
         throw std::runtime_error("Configuration error");
     }
 
-#if defined(HAVE_OUTPUT_UHD)
+
+#if defined(HAVE_OUTPUT_UHD) || defined(HAVE_DEXTER)
     mod_settings.sdr_device_config.enableSync = (pt.GetInteger("delaymanagement.synchronous", 0) == 1);
     mod_settings.sdr_device_config.muteNoTimestamps = (pt.GetInteger("delaymanagement.mutenotimestamps", 0) == 1);
     if (mod_settings.sdr_device_config.enableSync) {
@@ -375,8 +466,8 @@ static void parse_configfile(
             throw std::runtime_error("Configuration error");
         }
     }
-
 #endif
+
 
     /* Read TII parameters from config file */
     mod_settings.tiiConfig.enable = pt.GetInteger("tii.enable", 0);
@@ -519,8 +610,7 @@ void parse_args(int argc, char **argv, mod_settings_t& mod_settings)
 
             if (mod_settings.inputName.substr(0, 4) == "zmq+" &&
                 mod_settings.inputName.find("://") != std::string::npos) {
-                // if the name starts with zmq+XYZ://somewhere:port
-                mod_settings.inputTransport = "zeromq";
+                throw std::runtime_error("Support for ZeroMQ input transport has been removed.");
             }
             else if (mod_settings.inputName.substr(0, 6) == "tcp://") {
                 mod_settings.inputTransport = "tcp";

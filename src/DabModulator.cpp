@@ -3,7 +3,7 @@
    Her Majesty the Queen in Right of Canada (Communications Research
    Center Canada)
 
-   Copyright (C) 2019
+   Copyright (C) 2024
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -27,53 +27,53 @@
 
 #include <string>
 #include <memory>
+#include <vector>
 
 #include "DabModulator.h"
 #include "PcDebug.h"
 
-#if !defined(BUILD_FOR_EASYDABV3)
-# include "QpskSymbolMapper.h"
-# include "FrequencyInterleaver.h"
-# include "PhaseReference.h"
-# include "DifferentialModulator.h"
-# include "NullSymbol.h"
-# include "CicEqualizer.h"
-# include "OfdmGenerator.h"
-# include "GainControl.h"
-# include "GuardIntervalInserter.h"
-# include "Resampler.h"
-# include "FIRFilter.h"
-# include "MemlessPoly.h"
-# include "TII.h"
-#endif
-
-#include "FrameMultiplexer.h"
-#include "PrbsGenerator.h"
 #include "BlockPartitioner.h"
-#include "SignalMultiplexer.h"
+#include "CicEqualizer.h"
 #include "ConvEncoder.h"
-#include "PuncturingEncoder.h"
-#include "TimeInterleaver.h"
-#include "TimestampDecoder.h"
-#include "RemoteControl.h"
+#include "DifferentialModulator.h"
+#include "FIRFilter.h"
+#include "FrameMultiplexer.h"
+#include "FrequencyInterleaver.h"
+#include "GainControl.h"
+#include "GuardIntervalInserter.h"
 #include "Log.h"
+#include "MemlessPoly.h"
+#include "NullSymbol.h"
+#include "OfdmGenerator.h"
+#include "PhaseReference.h"
+#include "PrbsGenerator.h"
+#include "PuncturingEncoder.h"
+#include "QpskSymbolMapper.h"
+#include "RemoteControl.h"
+#include "Resampler.h"
+#include "SignalMultiplexer.h"
+#include "TII.h"
+#include "TimeInterleaver.h"
 
 using namespace std;
 
 DabModulator::DabModulator(EtiSource& etiSource,
-                           mod_settings_t& settings) :
+                           mod_settings_t& settings,
+                           const std::string& format) :
     ModInput(),
     RemoteControllable("modulator"),
     m_settings(settings),
-    myEtiSource(etiSource),
-    myFlowgraph()
+    m_format(format),
+    m_etiSource(etiSource),
+    m_flowgraph()
 {
     PDEBUG("DabModulator::DabModulator() @ %p\n", this);
 
     RC_ADD_PARAMETER(rate, "(Read-only) IQ output samplerate");
+    RC_ADD_PARAMETER(num_clipped_samples, "(Read-only) Number of samples clipped in last frame during format conversion");
 
     if (m_settings.dabMode == 0) {
-        setMode(2);
+        setMode(1);
     }
     else {
         setMode(m_settings.dabMode);
@@ -85,36 +85,36 @@ void DabModulator::setMode(unsigned mode)
 {
     switch (mode) {
     case 1:
-        myNbSymbols = 76;
-        myNbCarriers = 1536;
-        mySpacing = 2048;
-        myNullSize = 2656;
-        mySymSize = 2552;
-        myFicSizeOut = 288;
+        m_nbSymbols = 76;
+        m_nbCarriers = 1536;
+        m_spacing = 2048;
+        m_nullSize = 2656;
+        m_symSize = 2552;
+        m_ficSizeOut = 288;
         break;
     case 2:
-        myNbSymbols = 76;
-        myNbCarriers = 384;
-        mySpacing = 512;
-        myNullSize = 664;
-        mySymSize = 638;
-        myFicSizeOut = 288;
+        m_nbSymbols = 76;
+        m_nbCarriers = 384;
+        m_spacing = 512;
+        m_nullSize = 664;
+        m_symSize = 638;
+        m_ficSizeOut = 288;
         break;
     case 3:
-        myNbSymbols = 153;
-        myNbCarriers = 192;
-        mySpacing = 256;
-        myNullSize = 345;
-        mySymSize = 319;
-        myFicSizeOut = 384;
+        m_nbSymbols = 153;
+        m_nbCarriers = 192;
+        m_spacing = 256;
+        m_nullSize = 345;
+        m_symSize = 319;
+        m_ficSizeOut = 384;
         break;
     case 4:
-        myNbSymbols = 76;
-        myNbCarriers = 768;
-        mySpacing = 1024;
-        myNullSize = 1328;
-        mySymSize = 1276;
-        myFicSizeOut = 288;
+        m_nbSymbols = 76;
+        m_nbCarriers = 768;
+        m_spacing = 1024;
+        m_nullSize = 1328;
+        m_symSize = 1276;
+        m_ficSizeOut = 288;
         break;
     default:
         throw std::runtime_error("DabModulator::setMode invalid mode size");
@@ -128,27 +128,28 @@ int DabModulator::process(Buffer* dataOut)
 
     PDEBUG("DabModulator::process(dataOut: %p)\n", dataOut);
 
-    if (not myFlowgraph) {
+    if (not m_flowgraph) {
+        etiLog.level(debug) << "Setting up DabModulator...";
         const unsigned mode = m_settings.dabMode;
         setMode(mode);
 
-        myFlowgraph = make_shared<Flowgraph>(m_settings.showProcessTime);
+        m_flowgraph = make_shared<Flowgraph>(m_settings.showProcessTime);
         ////////////////////////////////////////////////////////////////
         // CIF data initialisation
         ////////////////////////////////////////////////////////////////
         auto cifPrbs = make_shared<PrbsGenerator>(864 * 8, 0x110);
-        auto cifMux = make_shared<FrameMultiplexer>(myEtiSource);
+        auto cifMux = make_shared<FrameMultiplexer>(m_etiSource);
         auto cifPart = make_shared<BlockPartitioner>(mode);
 
-#if !defined(BUILD_FOR_EASYDABV3)
-        auto cifMap = make_shared<QpskSymbolMapper>(myNbCarriers);
-        auto cifRef = make_shared<PhaseReference>(mode);
-        auto cifFreq = make_shared<FrequencyInterleaver>(mode);
-        auto cifDiff = make_shared<DifferentialModulator>(myNbCarriers);
+        const bool fixedPoint = m_settings.fftEngine != FFTEngine::FFTW;
+        auto cifMap = make_shared<QpskSymbolMapper>(m_nbCarriers, fixedPoint);
+        auto cifRef = make_shared<PhaseReference>(mode, fixedPoint);
+        auto cifFreq = make_shared<FrequencyInterleaver>(mode, fixedPoint);
+        auto cifDiff = make_shared<DifferentialModulator>(m_nbCarriers, fixedPoint);
 
-        auto cifNull = make_shared<NullSymbol>(myNbCarriers);
-        auto cifSig = make_shared<SignalMultiplexer>(
-                (1 + myNbSymbols) * myNbCarriers * sizeof(complexf));
+        auto cifNull = make_shared<NullSymbol>(m_nbCarriers,
+                fixedPoint ? sizeof(complexfix) : sizeof(complexf));
+        auto cifSig = make_shared<SignalMultiplexer>();
 
         // TODO this needs a review
         bool useCicEq = false;
@@ -169,8 +170,8 @@ int DabModulator::process(Buffer* dataOut)
         shared_ptr<CicEqualizer> cifCicEq;
         if (useCicEq) {
             cifCicEq = make_shared<CicEqualizer>(
-                myNbCarriers,
-                (float)mySpacing * (float)m_settings.outputRate / 2048000.0f,
+                m_nbCarriers,
+                (float)m_spacing * (float)m_settings.outputRate / 2048000.0f,
                 cic_ratio);
         }
 
@@ -179,46 +180,79 @@ int DabModulator::process(Buffer* dataOut)
         try {
             tii = make_shared<TII>(
                     m_settings.dabMode,
-                    m_settings.tiiConfig);
+                    m_settings.tiiConfig,
+                    fixedPoint);
             rcs.enrol(tii.get());
-            tiiRef = make_shared<PhaseReference>(mode);
+            tiiRef = make_shared<PhaseReference>(mode, fixedPoint);
         }
         catch (const TIIError& e) {
             etiLog.level(error) << "Could not initialise TII: " << e.what();
         }
 
-        auto cifOfdm = make_shared<OfdmGenerator>(
-                (1 + myNbSymbols),
-                myNbCarriers,
-                mySpacing,
-                m_settings.enableCfr,
-                m_settings.cfrClip,
-                m_settings.cfrErrorClip);
+        shared_ptr<ModPlugin> cifOfdm;
 
-        rcs.enrol(cifOfdm.get());
+        switch (m_settings.fftEngine) {
+            case FFTEngine::FFTW:
+                {
+                    auto ofdm = make_shared<OfdmGeneratorCF32>(
+                            (1 + m_nbSymbols),
+                            m_nbCarriers,
+                            m_spacing,
+                            m_settings.enableCfr,
+                            m_settings.cfrClip,
+                            m_settings.cfrErrorClip);
+                    rcs.enrol(ofdm.get());
+                    cifOfdm = ofdm;
+                }
+                break;
+            case FFTEngine::KISS:
+                cifOfdm = make_shared<OfdmGeneratorFixed>(
+                        (1 + m_nbSymbols),
+                        m_nbCarriers,
+                        m_spacing);
+                break;
+            case FFTEngine::DEXTER:
+#if defined(HAVE_DEXTER)
+                cifOfdm = make_shared<OfdmGeneratorDEXTER>(
+                        (1 + m_nbSymbols),
+                        m_nbCarriers,
+                        m_spacing);
+#else
+                throw std::runtime_error("Cannot use DEXTER fft engine without --enable-dexter");
+#endif
+                break;
+        }
 
-        auto cifGain = make_shared<GainControl>(
-                mySpacing,
-                m_settings.gainMode,
-                m_settings.digitalgain,
-                m_settings.normalise,
-                m_settings.gainmodeVariance);
+        shared_ptr<GainControl> cifGain;
 
-        rcs.enrol(cifGain.get());
+        if (not fixedPoint) {
+            cifGain = make_shared<GainControl>(
+                    m_spacing,
+                    m_settings.gainMode,
+                    m_settings.digitalgain,
+                    m_settings.normalise,
+                    m_settings.gainmodeVariance);
+
+            rcs.enrol(cifGain.get());
+        }
 
         auto cifGuard = make_shared<GuardIntervalInserter>(
-                myNbSymbols, mySpacing, myNullSize, mySymSize,
-                m_settings.ofdmWindowOverlap);
+                m_nbSymbols, m_spacing, m_nullSize, m_symSize,
+                m_settings.ofdmWindowOverlap, m_settings.fftEngine);
         rcs.enrol(cifGuard.get());
 
         shared_ptr<FIRFilter> cifFilter;
         if (not m_settings.filterTapsFilename.empty()) {
+            if (fixedPoint) throw std::runtime_error("fixed point doesn't support fir filter");
+
             cifFilter = make_shared<FIRFilter>(m_settings.filterTapsFilename);
             rcs.enrol(cifFilter.get());
         }
 
         shared_ptr<MemlessPoly> cifPoly;
         if (not m_settings.polyCoefFilename.empty()) {
+            if (fixedPoint) throw std::runtime_error("fixed point doesn't support predistortion");
+
             cifPoly = make_shared<MemlessPoly>(m_settings.polyCoefFilename,
                                                m_settings.polyNumThreads);
             rcs.enrol(cifPoly.get());
@@ -226,21 +260,30 @@ int DabModulator::process(Buffer* dataOut)
 
         shared_ptr<Resampler> cifRes;
         if (m_settings.outputRate != 2048000) {
+            if (fixedPoint) throw std::runtime_error("fixed point doesn't support resampler");
+
             cifRes = make_shared<Resampler>(
                     2048000,
                     m_settings.outputRate,
-                    mySpacing);
+                    m_spacing);
         }
-#endif
 
-        myOutput = make_shared<OutputMemory>(dataOut);
+        if (m_settings.fftEngine == FFTEngine::FFTW and not m_format.empty()) {
+            m_formatConverter = make_shared<FormatConverter>(false, m_format);
+        }
+        else if (m_settings.fftEngine == FFTEngine::DEXTER) {
+            m_formatConverter = make_shared<FormatConverter>(true, m_format);
+        }
+        // KISS is already in s16
 
-        myFlowgraph->connect(cifPrbs, cifMux);
+        m_output = make_shared<OutputMemory>(dataOut);
+
+        m_flowgraph->connect(cifPrbs, cifMux);
 
         ////////////////////////////////////////////////////////////////
         // Processing FIC
         ////////////////////////////////////////////////////////////////
-        shared_ptr<FicSource> fic(myEtiSource.getFic());
+        shared_ptr<FicSource> fic(m_etiSource.getFic());
         ////////////////////////////////////////////////////////////////
         // Data initialisation
         ////////////////////////////////////////////////////////////////
@@ -272,15 +315,15 @@ int DabModulator::process(Buffer* dataOut)
         PDEBUG(" Adding tail\n");
         ficPunc->append_tail_rule(PuncturingRule(3, 0xcccccc));
 
-        myFlowgraph->connect(fic, ficPrbs);
-        myFlowgraph->connect(ficPrbs, ficConv);
-        myFlowgraph->connect(ficConv, ficPunc);
-        myFlowgraph->connect(ficPunc, cifPart);
+        m_flowgraph->connect(fic, ficPrbs);
+        m_flowgraph->connect(ficPrbs, ficConv);
+        m_flowgraph->connect(ficConv, ficPunc);
+        m_flowgraph->connect(ficPunc, cifPart);
 
         ////////////////////////////////////////////////////////////////
         // Configuring subchannels
         ////////////////////////////////////////////////////////////////
-        for (const auto& subchannel : myEtiSource.getSubchannels()) {
+        for (const auto& subchannel : m_etiSource.getSubchannels()) {
 
             ////////////////////////////////////////////////////////////
             // Data initialisation
@@ -332,59 +375,59 @@ int DabModulator::process(Buffer* dataOut)
             // Configuring time interleaver
             auto subchInterleaver = make_shared<TimeInterleaver>(subchSizeOut);
 
-            myFlowgraph->connect(subchannel, subchPrbs);
-            myFlowgraph->connect(subchPrbs, subchConv);
-            myFlowgraph->connect(subchConv, subchPunc);
-            myFlowgraph->connect(subchPunc, subchInterleaver);
-            myFlowgraph->connect(subchInterleaver, cifMux);
+            m_flowgraph->connect(subchannel, subchPrbs);
+            m_flowgraph->connect(subchPrbs, subchConv);
+            m_flowgraph->connect(subchConv, subchPunc);
+            m_flowgraph->connect(subchPunc, subchInterleaver);
+            m_flowgraph->connect(subchInterleaver, cifMux);
         }
 
-        myFlowgraph->connect(cifMux, cifPart);
-#if defined(BUILD_FOR_EASYDABV3)
-        myFlowgraph->connect(cifPart, myOutput);
-#else
-        myFlowgraph->connect(cifPart, cifMap);
-        myFlowgraph->connect(cifMap, cifFreq);
-        myFlowgraph->connect(cifRef, cifDiff);
-        myFlowgraph->connect(cifFreq, cifDiff);
-        myFlowgraph->connect(cifNull, cifSig);
-        myFlowgraph->connect(cifDiff, cifSig);
+        m_flowgraph->connect(cifMux, cifPart);
+        m_flowgraph->connect(cifPart, cifMap);
+        m_flowgraph->connect(cifMap, cifFreq);
+        m_flowgraph->connect(cifRef, cifDiff);
+        m_flowgraph->connect(cifFreq, cifDiff);
+        m_flowgraph->connect(cifNull, cifSig);
+        m_flowgraph->connect(cifDiff, cifSig);
         if (tii) {
-            myFlowgraph->connect(tiiRef, tii);
-            myFlowgraph->connect(tii, cifSig);
+            m_flowgraph->connect(tiiRef, tii);
+            m_flowgraph->connect(tii, cifSig);
         }
 
         shared_ptr<ModPlugin> prev_plugin = static_pointer_cast<ModPlugin>(cifSig);
-        const std::list<shared_ptr<ModPlugin> > plugins({
+        const std::vector<shared_ptr<ModPlugin> > plugins({
                 static_pointer_cast<ModPlugin>(cifCicEq),
                 static_pointer_cast<ModPlugin>(cifOfdm),
                 static_pointer_cast<ModPlugin>(cifGain),
                 static_pointer_cast<ModPlugin>(cifGuard),
-                static_pointer_cast<ModPlugin>(cifFilter), // optional block
-                static_pointer_cast<ModPlugin>(cifRes),    // optional block
-                static_pointer_cast<ModPlugin>(cifPoly),   // optional block
-                static_pointer_cast<ModPlugin>(myOutput),
+                // optional blocks
+                static_pointer_cast<ModPlugin>(cifFilter),
+                static_pointer_cast<ModPlugin>(cifRes),
+                static_pointer_cast<ModPlugin>(cifPoly),
+                static_pointer_cast<ModPlugin>(m_formatConverter),
+                // mandatory block
+                static_pointer_cast<ModPlugin>(m_output),
                 });
 
         for (auto& p : plugins) {
             if (p) {
-                myFlowgraph->connect(prev_plugin, p);
+                m_flowgraph->connect(prev_plugin, p);
                 prev_plugin = p;
             }
         }
-#endif
+        etiLog.level(debug) << "DabModulator set up.";
     }
 
     ////////////////////////////////////////////////////////////////////
     // Processing data
     ////////////////////////////////////////////////////////////////////
-    return myFlowgraph->run();
+    return m_flowgraph->run();
 }
 
 meta_vec_t DabModulator::process_metadata(const meta_vec_t& metadataIn)
 {
-    if (myOutput) {
-        return myOutput->get_latest_metadata();
+    if (m_output) {
+        return m_output->get_latest_metadata();
     }
 
     return {};
@@ -395,6 +438,9 @@ void DabModulator::set_parameter(const string& parameter, const string& value)
 {
     if (parameter == "rate") {
         throw ParameterError("Parameter 'rate' is read-only");
+    }
+    else if (parameter == "num_clipped_samples") {
+        throw ParameterError("Parameter 'num_clipped_samples' is read-only");
     }
     else {
         stringstream ss;
@@ -410,10 +456,28 @@ const string DabModulator::get_parameter(const string& parameter) const
     if (parameter == "rate") {
         ss << m_settings.outputRate;
     }
+    else if (parameter == "num_clipped_samples") {
+        if (m_formatConverter) {
+            ss << m_formatConverter->get_num_clipped_samples();
+        }
+        else {
+            ss << "Parameter '" << parameter <<
+                "' is not available when no format conversion is done.";
+            throw ParameterError(ss.str());
+        }
+    }
     else {
         ss << "Parameter '" << parameter <<
             "' is not exported by controllable " << get_rc_name();
         throw ParameterError(ss.str());
     }
     return ss.str();
+}
+
+const json::map_t DabModulator::get_all_values() const
+{
+    json::map_t map;
+    map["rate"].v = m_settings.outputRate;
+    map["num_clipped_samples"].v = m_formatConverter ? m_formatConverter->get_num_clipped_samples() : 0;
+    return map;
 }

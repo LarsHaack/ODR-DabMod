@@ -2,7 +2,7 @@
    Copyright (C) 2005, 2006, 2007, 2008, 2009, 2010, 2011 Her Majesty
    the Queen in Right of Canada (Communications Research Center Canada)
 
-   Copyright (C) 2017
+   Copyright (C) 2024
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -30,9 +30,9 @@
 #   include <config.h>
 #endif
 
+#include "ConfigParser.h"
 #include "ModPlugin.h"
 #include "RemoteControl.h"
-#include <stdint.h>
 #include <vector>
 
 /* The GuardIntervalInserter prepends the cyclic prefix to all
@@ -50,28 +50,45 @@ class GuardIntervalInserter : public ModCodec, public RemoteControllable
                 size_t spacing,
                 size_t nullSize,
                 size_t symSize,
-                size_t& windowOverlap);
+                size_t& windowOverlap,
+                FFTEngine fftEngine);
 
-        int process(Buffer* const dataIn, Buffer* dataOut);
-        const char* name() { return "GuardIntervalInserter"; }
+        virtual ~GuardIntervalInserter() {}
+
+        int process(Buffer* const dataIn, Buffer* dataOut) override;
+        const char* name() override { return "GuardIntervalInserter"; }
 
         /******* REMOTE CONTROL ********/
-        virtual void set_parameter(const std::string& parameter,
-                const std::string& value);
+        virtual void set_parameter(const std::string& parameter, const std::string& value) override;
+        virtual const std::string get_parameter(const std::string& parameter) const override;
+        virtual const json::map_t get_all_values() const override;
 
-        virtual const std::string get_parameter(
-                const std::string& parameter) const;
+        struct Params {
+            Params(
+                size_t nbSymbols,
+                size_t spacing,
+                size_t nullSize,
+                size_t symSize,
+                size_t& windowOverlap);
+
+            size_t nbSymbols;
+            size_t spacing;
+            size_t nullSize;
+            size_t symSize;
+            size_t& windowOverlap;
+
+            mutable std::mutex windowMutex;
+            std::vector<float> windowFloat;
+            std::vector<complexfix::value_type> windowFix;
+            std::vector<complexfix_wide::value_type> windowFixWide;
+        };
 
     protected:
         void update_window(size_t new_window_overlap);
 
-        size_t d_nbSymbols;
-        size_t d_spacing;
-        size_t d_nullSize;
-        size_t d_symSize;
+        FFTEngine m_fftEngine;
 
-        mutable std::mutex d_windowMutex;
-        size_t& d_windowOverlap;
-        std::vector<float> d_window;
+        Params m_params;
+
 };
 

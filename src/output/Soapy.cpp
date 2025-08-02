@@ -86,7 +86,6 @@ Soapy::Soapy(SDRDeviceConfig& config) :
         " ksps.";
 
     tune(m_conf.lo_offset, m_conf.frequency);
-    m_conf.frequency = m_device->getFrequency(SOAPY_SDR_TX, 0);
     etiLog.level(info) << "SoapySDR:Actual frequency: " <<
         std::fixed << std::setprecision(3) <<
         m_conf.frequency / 1000.0 << " kHz.";
@@ -143,6 +142,8 @@ void Soapy::tune(double lo_offset, double frequency)
     SoapySDR::Kwargs offset_arg;
     offset_arg["OFFSET"] = to_string(lo_offset);
     m_device->setFrequency(SOAPY_SDR_TX, 0, m_conf.frequency, offset_arg);
+
+    m_conf.frequency = m_device->getFrequency(SOAPY_SDR_TX, 0);
 }
 
 double Soapy::get_tx_freq(void) const
@@ -180,13 +181,13 @@ double Soapy::get_bandwidth(void) const
     return m_device->getBandwidth(SOAPY_SDR_TX, 0);
 }
 
-SDRDevice::RunStatistics Soapy::get_run_statistics(void) const
+SDRDevice::run_statistics_t Soapy::get_run_statistics(void) const
 {
-    RunStatistics rs;
-    rs.num_underruns = underflows;
-    rs.num_overruns = overflows;
-    rs.num_late_packets = late_packets;
-    rs.num_frames_modulated = num_frames_modulated;
+    run_statistics_t rs;
+    rs["underruns"].v = underflows;
+    rs["overruns"].v = overflows;
+    rs["timeouts"].v = timeouts;
+    rs["frames"].v = num_frames_modulated;
     return rs;
 }
 
@@ -216,7 +217,7 @@ double Soapy::get_rxgain(void) const
 size_t Soapy::receive_frame(
         complexf *buf,
         size_t num_samples,
-        struct frame_timestamp& ts,
+        frame_timestamp& ts,
         double timeout_secs)
 {
     int flags = 0;
@@ -254,7 +255,7 @@ size_t Soapy::receive_frame(
 }
 
 
-bool Soapy::is_clk_source_ok() const
+bool Soapy::is_clk_source_ok()
 {
     // TODO
     return true;
@@ -265,14 +266,14 @@ const char* Soapy::device_name(void) const
     return "Soapy";
 }
 
-double Soapy::get_temperature(void) const
+std::optional<double> Soapy::get_temperature(void) const
 {
     // TODO Unimplemented
     // LimeSDR exports 'lms7_temp'
-    return std::numeric_limits<double>::quiet_NaN();
+    return std::nullopt;
 }
 
-void Soapy::transmit_frame(const struct FrameData& frame)
+void Soapy::transmit_frame(struct FrameData&& frame)
 {
     if (not m_device) throw runtime_error("Soapy device not set up");
 
@@ -311,7 +312,7 @@ void Soapy::transmit_frame(const struct FrameData& frame)
         const bool eob_because_muting = m_conf.muting;
         const bool end_of_burst = eob_because_muting or (
                 frame.ts.timestamp_valid and
-                frame.ts.timestamp_refresh and
+                m_require_timestamp_refresh and
                 samps_to_send <= mtu );
 
         int flags = 0;
@@ -320,6 +321,7 @@ void Soapy::transmit_frame(const struct FrameData& frame)
                 m_tx_stream, buffs, samps_to_send, flags, timeNs);
 
         if (num_sent == SOAPY_SDR_TIMEOUT) {
+            timeouts++;
             continue;
         }
         else if (num_sent == SOAPY_SDR_OVERFLOW) {
@@ -345,10 +347,11 @@ void Soapy::transmit_frame(const struct FrameData& frame)
             int ret_deact = m_device->deactivateStream(m_tx_stream);
             if (ret_deact != 0) {
                 throw std::runtime_error(
-                        string("Soapy activate TX stream failed: ") +
+                        string("Soapy deactivate TX stream failed: ") +
                         SoapySDR::errToStr(ret_deact));
             }
             m_tx_stream_active = false;
+            m_require_timestamp_refresh = false;
         }
 
         if (eob_because_muting) {

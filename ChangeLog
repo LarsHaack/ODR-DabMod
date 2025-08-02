@@ -1,6 +1,29 @@
 This file contains information about the changes done to
 ODR-DabMod in this repository
 
+2025-02-26: Matthias P. Braendli <matthias@mpb.li>
+	(v3.0.0):
+		Add support for the PrecisionWave DEXTER Modulator.
+		Improve timestamp decoding and handling.
+		Fix TII carrier levels.
+		Add `showjson` command to RC to support structured output,
+		and add useful metrics to the RC for monitoring, e.g. some Ensemble information from FIC.
+		Remove EasyDABv3 support.
+		Remove ZeroMQ input.
+		Require C++17.
+		v2.7.0 retracted.
+
+2022-04-20: Matthias P. Braendli <matthias@mpb.li>
+	(v2.6.0):
+		Add timestamps to log output.
+
+2022-02-02: Matthias P. Braendli <matthias@mpb.li>
+	(v2.5.0):
+		Add support for BladeRF devices.
+		Improve EDI input.
+		Improve compilation on arm devices.
+		Avoid stalling the input when FFTW planner takes too much time.
+
 2021-02-22: Matthias P. Braendli <matthias@mpb.li>
 	(v2.4.2):
 		Fix some compilation issues for GCC 10 and due to missing includes.

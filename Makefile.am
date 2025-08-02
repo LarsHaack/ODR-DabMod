@@ -1,7 +1,7 @@
 # Copyright (C) 2007, 2008, 2009, 2010 Her Majesty the Queen in Right
 # of Canada (Communications Research Center Canada)
 #
-#  Copyright (C) 2018
+#  Copyright (C) 2023
 #  Matthias P. Braendli, matthias.braendli@mpb.li
 #
 #   http://opendigitalradio.org
@@ -35,17 +35,20 @@ endif
 
 bin_PROGRAMS = odr-dabmod
 
-odr_dabmod_CFLAGS   = -Wall -Isrc -Ilib \
-					  $(GITVERSION_FLAGS)
-odr_dabmod_CXXFLAGS = -Wall -Isrc -Ilib -std=c++11 \
-					  $(GITVERSION_FLAGS) $(BOOST_CPPFLAGS)
-odr_dabmod_LDADD    =  $(BOOST_LDFLAGS) $(BOOST_THREAD_LIB)
+KISS_FLAGS=-DFIXED_POINT=16
+odr_dabmod_CFLAGS   = -Wall -Isrc -Ilib -Ikiss \
+					  $(GITVERSION_FLAGS) $(KISS_FLAGS)
+odr_dabmod_CXXFLAGS = -Wall -Isrc -Ilib -Ikiss \
+					  $(GITVERSION_FLAGS) $(BOOST_CPPFLAGS) $(KISS_FLAGS)
+odr_dabmod_LDADD    =  $(BOOST_LDFLAGS) $(BOOST_THREAD_LIB) $(UHD_LIBS) $(LIMESDR_LIBS) $(ADDITIONAL_UHD_LIBS)
 odr_dabmod_SOURCES  = src/DabMod.cpp \
 					  src/PcDebug.h \
 					  src/DabModulator.cpp \
 					  src/DabModulator.h \
 					  src/Buffer.cpp \
 					  src/Buffer.h \
+					  src/CharsetTools.cpp \
+					  src/CharsetTools.h \
 					  src/ConfigParser.cpp \
 					  src/ConfigParser.h \
 					  src/ModPlugin.cpp \
@@ -54,6 +57,10 @@ odr_dabmod_SOURCES  = src/DabMod.cpp \
 					  src/EtiReader.h \
 					  src/Eti.cpp \
 					  src/Eti.h \
+					  src/Events.cpp \
+					  src/Events.h \
+					  src/FigParser.cpp \
+					  src/FigParser.h \
 					  src/FicSource.cpp \
 					  src/FicSource.h \
 					  src/PuncturingRule.cpp \
@@ -75,7 +82,6 @@ odr_dabmod_SOURCES  = src/DabMod.cpp \
 					  src/InputMemory.h \
 					  src/InputReader.h \
 					  src/InputTcpReader.cpp \
-					  src/InputZeroMQReader.cpp \
 					  src/OutputFile.cpp \
 					  src/OutputFile.h \
 					  src/FrameMultiplexer.cpp \
@@ -99,6 +105,8 @@ odr_dabmod_SOURCES  = src/DabMod.cpp \
 					  lib/RemoteControl.h \
 					  lib/Log.cpp \
 					  lib/Log.h \
+					  lib/Json.h \
+					  lib/Json.cpp \
 					  lib/Globals.cpp \
 					  lib/INIReader.h \
 					  lib/crc.h \
@@ -123,10 +131,7 @@ odr_dabmod_SOURCES  = src/DabMod.cpp \
 					  lib/edi/ETIDecoder.hpp \
 					  lib/edi/ETIDecoder.cpp \
 					  lib/edi/PFT.hpp \
-					  lib/edi/PFT.cpp
-
-if !COMPILE_FOR_EASYDABV3
-odr_dabmod_SOURCES += \
+					  lib/edi/PFT.cpp \
 					  src/FIRFilter.cpp \
 					  src/FIRFilter.h \
 					  src/MemlessPoly.cpp \
@@ -138,6 +143,8 @@ odr_dabmod_SOURCES += \
 					  src/output/SDR.cpp \
 					  src/output/SDR.h \
 					  src/output/SDRDevice.h \
+					  src/output/Dexter.cpp \
+					  src/output/Dexter.h \
 					  src/output/Soapy.cpp \
 					  src/output/Soapy.h \
 					  src/output/UHD.cpp \
@@ -146,6 +153,8 @@ odr_dabmod_SOURCES += \
 					  src/output/USRPTime.h \
 					  src/output/Lime.cpp \
 					  src/output/Lime.h \
+					  src/output/BladeRF.cpp \
+					  src/output/BladeRF.h \
 					  src/PhaseReference.cpp \
 					  src/PhaseReference.h \
 					  src/QpskSymbolMapper.cpp \
@@ -167,8 +176,17 @@ odr_dabmod_SOURCES += \
 					  src/PAPRStats.cpp \
 					  src/PAPRStats.h \
 					  src/TII.cpp \
-					  src/TII.h
+					  src/TII.h \
+					  kiss/kfc.h \
+					  kiss/kfc.c \
+					  kiss/kiss_fft.c \
+					  kiss/kiss_fft.h \
+					  kiss/kiss_fftnd.c \
+					  kiss/kiss_fftnd.h \
+					  kiss/kiss_fftndr.c \
+					  kiss/kiss_fftndr.h \
+					  kiss/kiss_fftr.c \
+					  kiss/kiss_fftr.h
 
-odr_dabmod_LDADD   += $(UHD_LIBS) $(LIMESDR_LIBS) $(ADDITIONAL_UHD_LIBS)
-endif
 
+man_MANS = man/odr-dabmod.1

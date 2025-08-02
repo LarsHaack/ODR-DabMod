@@ -3,7 +3,7 @@
    Her Majesty the Queen in Right of Canada (Communications Research
    Center Canada)
 
-   Copyright (C) 2017
+   Copyright (C) 2023
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -34,14 +34,17 @@
 #include <string>
 #include "GainControl.h"
 #include "TII.h"
-#include "output/SDR.h"
-#include "output/UHD.h"
-#include "output/Soapy.h"
-#include "output/Lime.h"
+#include "output/SDRDevice.h"
 
-#define ZMQ_INPUT_MAX_FRAME_QUEUE 500
+enum class FFTEngine {
+    FFTW, // floating point in software
+    KISS, // fixed-point in software
+    DEXTER // fixed-point in FPGA
+};
 
 struct mod_settings_t {
+    std::string startupCheck;
+
     std::string outputName;
     bool useZeroMQOutput = false;
     std::string zmqOutputSocketType = "";
@@ -50,7 +53,11 @@ struct mod_settings_t {
     bool fileOutputShowMetadata = false;
     bool useUHDOutput = false;
     bool useSoapyOutput = false;
+    bool useDexterOutput = false;
     bool useLimeOutput = false;
+    bool useBladeRFOutput = false;
+
+    FFTEngine fftEngine = FFTEngine::FFTW;
 
     size_t outputRate = 2048000;
     size_t clockRate = 0;
@@ -66,7 +73,6 @@ struct mod_settings_t {
     bool loop = false;
     std::string inputName = "";
     std::string inputTransport = "file";
-    unsigned inputMaxFramesQueued = ZMQ_INPUT_MAX_FRAME_QUEUE;
     float edi_max_delay_ms = 0.0f;
 
     tii_config_t tiiConfig;
@@ -84,9 +90,7 @@ struct mod_settings_t {
     // Settings for the OFDM windowing
     size_t ofdmWindowOverlap = 0;
 
-#if defined(HAVE_OUTPUT_UHD) || defined(HAVE_SOAPYSDR) || defined(HAVE_LIMESDR)
     Output::SDRDeviceConfig sdr_device_config;
-#endif
 
     bool showProcessTime = true;
 };

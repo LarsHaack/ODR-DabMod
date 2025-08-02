@@ -2,7 +2,7 @@
    Copyright (C) 2005, 2006, 2007, 2008, 2009, 2010, 2011 Her Majesty
    the Queen in Right of Canada (Communications Research Center Canada)
 
-   Copyright (C) 2017
+   Copyright (C) 2022
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -33,20 +33,30 @@
 #endif
 
 #include "ModPlugin.h"
-#include <complex>
+#include <atomic>
 #include <string>
-#include <cstdint>
 
 class FormatConverter : public ModCodec
 {
     public:
-        FormatConverter(const std::string& format);
+        static size_t get_format_size(const std::string& format);
+
+        // floating-point input allows output formats: s8, u8 and s16
+        // complexfix_wide input allows output formats: s16
+        // complexfix input is already in s16, and needs no converter
+        FormatConverter(bool input_is_complexfix_wide, const std::string& format_out);
+        virtual ~FormatConverter();
 
         int process(Buffer* const dataIn, Buffer* dataOut);
         const char* name();
 
+        size_t get_num_clipped_samples() const;
+
     private:
-        std::string m_format;
+        bool m_input_complexfix_wide;
+        std::string m_format_out;
+
+        std::atomic<size_t> m_num_clipped_samples = 0;
 };
 
 

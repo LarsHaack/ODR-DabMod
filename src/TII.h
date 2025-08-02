@@ -2,7 +2,7 @@
    Copyright (C) 2005, 2006, 2007, 2008, 2009, 2010, 2011 Her Majesty
    the Queen in Right of Canada (Communications Research Center Canada)
 
-   Copyright (C) 2018
+   Copyright (C) 2024
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -36,8 +36,6 @@
 #include "RemoteControl.h"
 
 #include <cstddef>
-#include <thread>
-#include <complex>
 #include <vector>
 #include <string>
 
@@ -81,17 +79,16 @@ class TIIError : public std::runtime_error {
 class TII : public ModCodec, public RemoteControllable
 {
     public:
-        TII(unsigned int dabmode, tii_config_t& tii_config);
+        TII(unsigned int dabmode, tii_config_t& tii_config, bool fixedPoint);
+        virtual ~TII() {}
 
-        int process(Buffer* dataIn, Buffer* dataOut);
-        const char* name();
+        int process(Buffer* dataIn, Buffer* dataOut) override;
+        const char* name() override;
 
         /******* REMOTE CONTROL ********/
-        virtual void set_parameter(const std::string& parameter,
-                const std::string& value);
-
-        virtual const std::string get_parameter(
-                const std::string& parameter) const;
+        virtual void set_parameter(const std::string& parameter, const std::string& value) override;
+        virtual const std::string get_parameter(const std::string& parameter) const override;
+        virtual const json::map_t get_all_values() const override;
 
     protected:
         // Fill m_Acp with the correct carriers for the pattern/comb
@@ -106,6 +103,8 @@ class TII : public ModCodec, public RemoteControllable
 
         // Remote-controllable settings
         tii_config_t& m_conf;
+
+        bool m_fixedPoint = false;
 
         // Internal flag when to insert TII
         bool m_insert = true;

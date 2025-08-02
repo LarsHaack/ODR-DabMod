@@ -2,7 +2,7 @@
    Copyright (C) 2003, 2004, 2005, 2006, 2007, 2008, 2009 Her Majesty the
    Queen in Right of Canada (Communications Research Center Canada)
 
-   Copyright (C) 2020
+   Copyright (C) 2022
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://www.opendigitalradio.org
@@ -24,12 +24,13 @@
 
 #include "Socket.h"
 
-#include <iostream>
+#include <stdexcept>
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
 #include <fcntl.h>
 #include <poll.h>
+#include <netinet/tcp.h>
 
 namespace Socket {
 
@@ -105,16 +106,20 @@ UDPSocket::UDPSocket(UDPSocket&& other)
 {
     m_sock = other.m_sock;
     m_port = other.m_port;
+    m_multicast_source = other.m_multicast_source;
     other.m_port = 0;
     other.m_sock = INVALID_SOCKET;
+    other.m_multicast_source = "";
 }
 
 const UDPSocket& UDPSocket::operator=(UDPSocket&& other)
 {
     m_sock = other.m_sock;
     m_port = other.m_port;
+    m_multicast_source = other.m_multicast_source;
     other.m_port = 0;
     other.m_sock = INVALID_SOCKET;
+    other.m_multicast_source = "";
     return *this;
 }
 
@@ -143,6 +148,7 @@ void UDPSocket::reinit(int port, const std::string& name)
         // No need to bind to a given port, creating the
         // socket is enough
         m_sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+        post_init();
         return;
     }
 
@@ -179,6 +185,7 @@ void UDPSocket::reinit(int port, const std::string& name)
 
         if (::bind(sfd, rp->ai_addr, rp->ai_addrlen) == 0) {
             m_sock = sfd;
+            post_init();
             break;
         }
 
@@ -188,9 +195,46 @@ void UDPSocket::reinit(int port, const std::string& name)
     freeaddrinfo(result);
 
     if (rp == nullptr) {
-        throw runtime_error("Could not bind");
+        throw runtime_error(string{"Could not bind to port "} + to_string(port));
     }
 }
+
+void UDPSocket::post_init() {
+    int pktinfo = 1;
+    if (setsockopt(m_sock, IPPROTO_IP, IP_PKTINFO, &pktinfo, sizeof(pktinfo)) == SOCKET_ERROR) {
+        throw runtime_error(string("Can't request pktinfo: ") + strerror(errno));
+    }
+
+}
+
+void UDPSocket::init_receive_multicast(int port, const string& local_if_addr, const string& mcastaddr)
+{
+    if (m_sock != INVALID_SOCKET) {
+        ::close(m_sock);
+    }
+
+    m_port = port;
+    m_sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+    post_init();
+
+    int reuse_setting = 1;
+    if (setsockopt(m_sock, SOL_SOCKET, SO_REUSEADDR, &reuse_setting, sizeof(reuse_setting)) == SOCKET_ERROR) {
+        throw runtime_error("Can't reuse address");
+    }
+
+    struct sockaddr_in la;
+    memset((char *) &la, 0, sizeof(la));
+    la.sin_family = AF_INET;
+    la.sin_port = htons(port);
+    la.sin_addr.s_addr = INADDR_ANY;
+    if (::bind(m_sock, (struct sockaddr*)&la, sizeof(la))) {
+        throw runtime_error(string("Could not bind: ") + strerror(errno));
+    }
+
+    m_multicast_source = mcastaddr;
+    join_group(mcastaddr.c_str(), local_if_addr.c_str());
+}
+
 
 void UDPSocket::close()
 {
@@ -211,16 +255,26 @@ UDPSocket::~UDPSocket()
 
 UDPPacket UDPSocket::receive(size_t max_size)
 {
-    UDPPacket packet(max_size);
-    socklen_t addrSize;
-    addrSize = sizeof(*packet.address.as_sockaddr());
-    ssize_t ret = recvfrom(m_sock,
-            packet.buffer.data(),
-            packet.buffer.size(),
-            0,
-            packet.address.as_sockaddr(),
-            &addrSize);
+    struct sockaddr_in addr;
+    struct msghdr msg;
+    struct iovec iov;
+    constexpr size_t BUFFER_SIZE = 1024;
+    char control_buffer[BUFFER_SIZE];
+    struct cmsghdr *cmsg;
 
+    UDPPacket packet(max_size);
+
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_name = &addr;
+    msg.msg_namelen = sizeof(addr);
+    msg.msg_iov = &iov;
+    iov.iov_base = packet.buffer.data();
+    iov.iov_len = packet.buffer.size();
+    msg.msg_iovlen = 1;
+    msg.msg_control = control_buffer;
+    msg.msg_controllen = sizeof(control_buffer);
+
+    ssize_t ret = recvmsg(m_sock, &msg, 0);
     if (ret == SOCKET_ERROR) {
         packet.buffer.resize(0);
 
@@ -231,12 +285,42 @@ UDPPacket UDPSocket::receive(size_t max_size)
         if (errno == EAGAIN or errno == EWOULDBLOCK)
 #endif
         {
-            return 0;
+            return packet;
         }
         throw runtime_error(string("Can't receive data: ") + strerror(errno));
     }
 
-    packet.buffer.resize(ret);
+    struct in_pktinfo *pktinfo = nullptr;
+    for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
+            pktinfo = (struct in_pktinfo *)CMSG_DATA(cmsg);
+            break;
+        }
+    }
+
+    if (pktinfo) {
+        char src_addr[INET_ADDRSTRLEN];
+        char dst_addr[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(addr.sin_addr), src_addr, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &(pktinfo->ipi_addr), dst_addr, INET_ADDRSTRLEN);
+        //fprintf(stderr, "Received packet from %s to %s: %zu\n", src_addr, dst_addr, ret);
+
+        memcpy(&packet.address.addr, &addr, sizeof(addr));
+
+        if (m_multicast_source.empty() or
+                strcmp(dst_addr, m_multicast_source.c_str()) == 0) {
+            packet.buffer.resize(ret);
+        }
+        else {
+            // Ignore packet for different multicast group
+            packet.buffer.resize(0);
+        }
+    }
+    else {
+        //fprintf(stderr, "No pktinfo: %zu\n", ret);
+        packet.buffer.resize(ret);
+    }
+
     return packet;
 }
 
@@ -259,7 +343,16 @@ void UDPSocket::send(const std::vector<uint8_t>& data, InetAddress destination)
     }
 }
 
-void UDPSocket::joinGroup(const char* groupname, const char* if_addr)
+void UDPSocket::send(const std::string& data, InetAddress destination)
+{
+    const int ret = sendto(m_sock, data.data(), data.size(), 0,
+            destination.as_sockaddr(), sizeof(*destination.as_sockaddr()));
+    if (ret == SOCKET_ERROR && errno != ECONNREFUSED) {
+        throw runtime_error(string("Can't send UDP packet: ") + strerror(errno));
+    }
+}
+
+void UDPSocket::join_group(const char* groupname, const char* if_addr)
 {
 #ifdef CYGWIN_BUILD	
     throw runtime_error(string("UDPSocket::joinGroup()  NOT SUPPORTED IN CYGWIN BUILD"));
@@ -269,7 +362,7 @@ void UDPSocket::joinGroup(const char* groupname, const char* if_addr)
         throw runtime_error("Cannot convert multicast group name");
     }
     if (!IN_MULTICAST(ntohl(group.imr_multiaddr.s_addr))) {
-        throw runtime_error("Group name is not a multicast address");
+        throw runtime_error(string("Group name '") + groupname + "' is not a multicast address");
     }
 
     if (if_addr) {
@@ -281,7 +374,7 @@ void UDPSocket::joinGroup(const char* groupname, const char* if_addr)
     group.imr_ifindex = 0;
     if (setsockopt(m_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group))
             == SOCKET_ERROR) {
-        throw runtime_error(string("Can't join multicast group") + strerror(errno));
+        throw runtime_error(string("Can't join multicast group: ") + strerror(errno));
     }
 #endif	
 }
@@ -290,12 +383,12 @@ void UDPSocket::setMulticastSource(const char* source_addr)
 {
     struct in_addr addr;
     if (inet_aton(source_addr, &addr) == 0) {
-        throw runtime_error(string("Can't parse source address") + strerror(errno));
+        throw runtime_error(string("Can't parse source address: ") + strerror(errno));
     }
 
     if (setsockopt(m_sock, IPPROTO_IP, IP_MULTICAST_IF, &addr, sizeof(addr))
             == SOCKET_ERROR) {
-        throw runtime_error(string("Can't set source address") + strerror(errno));
+        throw runtime_error(string("Can't set source address: ") + strerror(errno));
     }
 }
 
@@ -303,7 +396,7 @@ void UDPSocket::setMulticastTTL(int ttl)
 {
     if (setsockopt(m_sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl))
             == SOCKET_ERROR) {
-        throw runtime_error(string("Can't set multicast ttl") + strerror(errno));
+        throw runtime_error(string("Can't set multicast ttl: ") + strerror(errno));
     }
 }
 
@@ -321,15 +414,13 @@ void UDPReceiver::add_receive_port(int port, const string& bindto, const string&
     UDPSocket sock;
 
     if (IN_MULTICAST(ntohl(inet_addr(mcastaddr.c_str())))) {
-        sock.reinit(port, mcastaddr);
-        sock.setMulticastSource(bindto.c_str());
-        sock.joinGroup(mcastaddr.c_str(), bindto.c_str());
+        sock.init_receive_multicast(port, bindto, mcastaddr);
     }
     else {
         sock.reinit(port, bindto);
     }
 
-    m_sockets.push_back(move(sock));
+    m_sockets.push_back(std::move(sock));
 }
 
 vector<UDPReceiver::ReceivedPacket> UDPReceiver::receive(int timeout_ms)
@@ -360,11 +451,13 @@ vector<UDPReceiver::ReceivedPacket> UDPReceiver::receive(int timeout_ms)
         for (size_t i = 0; i < m_sockets.size(); i++) {
             if (fds[i].revents & POLLIN) {
                 auto p = m_sockets[i].receive(2048); // This is larger than the usual MTU
-                ReceivedPacket rp;
-                rp.packetdata = move(p.buffer);
-                rp.received_from = move(p.address);
-                rp.port_received_on = m_sockets[i].getPort();
-                received.push_back(move(rp));
+                if (not p.buffer.empty()) {
+                    ReceivedPacket rp;
+                    rp.packetdata = std::move(p.buffer);
+                    rp.received_from = std::move(p.address);
+                    rp.port_received_on = m_sockets[i].getPort();
+                    received.push_back(std::move(rp));
+                }
             }
         }
 
@@ -389,7 +482,7 @@ TCPSocket::~TCPSocket()
 
 TCPSocket::TCPSocket(TCPSocket&& other) :
     m_sock(other.m_sock),
-    m_remote_address(move(other.m_remote_address))
+    m_remote_address(std::move(other.m_remote_address))
 {
     if (other.m_sock != -1) {
         other.m_sock = -1;
@@ -411,6 +504,121 @@ TCPSocket& TCPSocket::operator=(TCPSocket&& other)
 bool TCPSocket::valid() const
 {
     return m_sock != -1;
+}
+
+void TCPSocket::connect(const std::string& hostname, int port, int timeout_ms)
+{
+    if (m_sock != INVALID_SOCKET) {
+        throw std::logic_error("You may only connect an invalid TCPSocket");
+    }
+
+    char service[NI_MAXSERV];
+    snprintf(service, NI_MAXSERV-1, "%d", port);
+
+    /* Obtain address(es) matching host/port */
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = 0;
+    hints.ai_protocol = 0;
+
+    struct addrinfo *result, *rp;
+    int s = getaddrinfo(hostname.c_str(), service, &hints, &result);
+    if (s != 0) {
+        throw runtime_error(string("getaddrinfo failed: ") + gai_strerror(s));
+    }
+
+    int flags = 0;
+
+    /* getaddrinfo() returns a list of address structures.
+       Try each address until we successfully connect(2).
+       If socket(2) (or connect(2)) fails, we (close the socket
+       and) try the next address. */
+
+    for (rp = result; rp != nullptr; rp = rp->ai_next) {
+        int sfd = ::socket(rp->ai_family, rp->ai_socktype,
+                rp->ai_protocol);
+        if (sfd == -1)
+            continue;
+
+        flags = fcntl(sfd, F_GETFL);
+        if (flags == -1) {
+            std::string errstr(strerror(errno));
+            throw std::runtime_error("TCP: Could not get socket flags: " + errstr);
+        }
+
+        if (fcntl(sfd, F_SETFL, flags | O_NONBLOCK) == -1) {
+            std::string errstr(strerror(errno));
+            throw std::runtime_error("TCP: Could not set O_NONBLOCK: " + errstr);
+        }
+
+        int ret = ::connect(sfd, rp->ai_addr, rp->ai_addrlen);
+        if (ret == 0) {
+            m_sock = sfd;
+            break;
+        }
+        if (ret == -1 and errno == EINPROGRESS) {
+            m_sock = sfd;
+            struct pollfd fds[1];
+            fds[0].fd = m_sock;
+            fds[0].events = POLLOUT;
+
+            int retval = poll(fds, 1, timeout_ms);
+
+            if (retval == -1) {
+                std::string errstr(strerror(errno));
+                ::close(m_sock);
+                freeaddrinfo(result);
+                throw runtime_error("TCP: connect error on poll: " + errstr);
+            }
+            else if (retval > 0) {
+                int so_error = 0;
+                socklen_t len = sizeof(so_error);
+
+                if (getsockopt(m_sock, SOL_SOCKET, SO_ERROR, &so_error, &len) == -1) {
+                    std::string errstr(strerror(errno));
+                    ::close(m_sock);
+                    freeaddrinfo(result);
+                    throw runtime_error("TCP: getsockopt error connect: " + errstr);
+                }
+
+                if (so_error == 0) {
+                    break;
+                }
+            }
+            else {
+                ::close(m_sock);
+                freeaddrinfo(result);
+                throw runtime_error("Timeout on connect");
+            }
+            break;
+        }
+
+        ::close(sfd);
+    }
+
+    if (m_sock != INVALID_SOCKET) {
+#if defined(HAVE_SO_NOSIGPIPE)
+        int val = 1;
+        if (setsockopt(m_sock, SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val))
+                == SOCKET_ERROR) {
+            throw runtime_error("Can't set SO_NOSIGPIPE");
+        }
+#endif
+    }
+
+    // Don't keep the socket blocking
+    if (fcntl(m_sock, F_SETFL, flags) == -1) {
+        std::string errstr(strerror(errno));
+        throw std::runtime_error("TCP: Could not set O_NONBLOCK: " + errstr);
+    }
+
+    freeaddrinfo(result);
+
+    if (rp == nullptr) {
+        throw runtime_error("Could not connect");
+    }
 }
 
 void TCPSocket::connect(const std::string& hostname, int port, bool nonblock)
@@ -451,11 +659,15 @@ void TCPSocket::connect(const std::string& hostname, int port, bool nonblock)
             int flags = fcntl(sfd, F_GETFL);
             if (flags == -1) {
                 std::string errstr(strerror(errno));
+                freeaddrinfo(result);
+                ::close(sfd);
                 throw std::runtime_error("TCP: Could not get socket flags: " + errstr);
             }
 
             if (fcntl(sfd, F_SETFL, flags | O_NONBLOCK) == -1) {
                 std::string errstr(strerror(errno));
+                freeaddrinfo(result);
+                ::close(sfd);
                 throw std::runtime_error("TCP: Could not set O_NONBLOCK: " + errstr);
             }
         }
@@ -484,7 +696,37 @@ void TCPSocket::connect(const std::string& hostname, int port, bool nonblock)
     if (rp == nullptr) {
         throw runtime_error("Could not connect");
     }
+}
 
+void TCPSocket::enable_keepalive(int time, int intvl, int probes)
+{
+    if (m_sock == INVALID_SOCKET) {
+        throw std::logic_error("You may not call enable_keepalive on invalid socket");
+    }
+    int optval = 1;
+    auto optlen = sizeof(optval);
+    if (setsockopt(m_sock, SOL_SOCKET, SO_KEEPALIVE, &optval, optlen) < 0) {
+        std::string errstr(strerror(errno));
+        throw std::runtime_error("TCP: Could not set SO_KEEPALIVE: " + errstr);
+    }
+
+    optval = time;
+    if (setsockopt(m_sock, SOL_TCP, TCP_KEEPIDLE, &optval, optlen) < 0) {
+        std::string errstr(strerror(errno));
+        throw std::runtime_error("TCP: Could not set TCP_KEEPIDLE: " + errstr);
+    }
+
+    optval = intvl;
+    if (setsockopt(m_sock, SOL_TCP, TCP_KEEPINTVL, &optval, optlen) < 0) {
+        std::string errstr(strerror(errno));
+        throw std::runtime_error("TCP: Could not set TCP_KEEPINTVL: " + errstr);
+    }
+
+    optval = probes;
+    if (setsockopt(m_sock, SOL_TCP, TCP_KEEPCNT, &optval, optlen) < 0) {
+        std::string errstr(strerror(errno));
+        throw std::runtime_error("TCP: Could not set TCP_KEEPCNT: " + errstr);
+    }
 }
 
 void TCPSocket::listen(int port, const string& name)
@@ -729,22 +971,33 @@ ssize_t TCPClient::recv(void *buffer, size_t length, int flags, int timeout_ms)
             reconnect();
         }
 
+        m_last_received_packet_ts = chrono::steady_clock::now();
+
         return ret;
     }
     catch (const TCPSocket::Interrupted&) {
         return -1;
     }
     catch (const TCPSocket::Timeout&) {
+        const auto timeout = chrono::milliseconds(timeout_ms * 5);
+        if (m_last_received_packet_ts.has_value() and
+            chrono::steady_clock::now() - *m_last_received_packet_ts > timeout)
+        {
+            // This is to catch half-closed TCP connections
+            reconnect();
+        }
+
         return 0;
     }
 
-    return 0;
+    throw std::logic_error("unreachable");
 }
 
 void TCPClient::reconnect()
 {
     TCPSocket newsock;
     m_sock = std::move(newsock);
+    m_last_received_packet_ts = nullopt;
     m_sock.connect(m_hostname, m_port, true);
 }
 
@@ -752,7 +1005,7 @@ TCPConnection::TCPConnection(TCPSocket&& sock) :
             queue(),
             m_running(true),
             m_sender_thread(),
-            m_sock(move(sock))
+            m_sock(std::move(sock))
 {
 #if MISSING_OWN_ADDR
     auto own_addr = m_sock.getOwnAddress();
@@ -815,8 +1068,9 @@ void TCPConnection::process()
 }
 
 
-TCPDataDispatcher::TCPDataDispatcher(size_t max_queue_size) :
-    m_max_queue_size(max_queue_size)
+TCPDataDispatcher::TCPDataDispatcher(size_t max_queue_size, size_t buffers_to_preroll) :
+    m_max_queue_size(max_queue_size),
+    m_buffers_to_preroll(buffers_to_preroll)
 {
 }
 
@@ -844,12 +1098,20 @@ void TCPDataDispatcher::write(const vector<uint8_t>& data)
         throw runtime_error(m_exception_data);
     }
 
+    auto lock = unique_lock<mutex>(m_mutex);
+
+    if (m_buffers_to_preroll > 0) {
+        m_preroll_queue.push_back(data);
+        if (m_preroll_queue.size() > m_buffers_to_preroll) {
+            m_preroll_queue.pop_front();
+        }
+    }
+
     for (auto& connection : m_connections) {
         connection.queue.push(data);
     }
 
-    m_connections.remove_if(
-            [&](const TCPConnection& conn){ return conn.queue.size() > m_max_queue_size; });
+    m_connections.remove_if( [&](const TCPConnection& conn){ return conn.queue.size() > m_max_queue_size; });
 }
 
 void TCPDataDispatcher::process()
@@ -861,7 +1123,14 @@ void TCPDataDispatcher::process()
             // Add a new TCPConnection to the list, constructing it from the client socket
             auto sock = m_listener_socket.accept(timeout_ms);
             if (sock.valid()) {
-                m_connections.emplace(m_connections.begin(), move(sock));
+                auto lock = unique_lock<mutex>(m_mutex);
+                m_connections.emplace(m_connections.begin(), std::move(sock));
+
+                if (m_buffers_to_preroll > 0) {
+                    for (const auto& buf : m_preroll_queue) {
+                        m_connections.front().queue.push(buf);
+                    }
+                }
             }
         }
     }
@@ -927,7 +1196,7 @@ void TCPReceiveServer::process()
                 }
                 else {
                     buf.resize(r);
-                    m_queue.push(make_shared<TCPReceiveMessageData>(move(buf)));
+                    m_queue.push(make_shared<TCPReceiveMessageData>(std::move(buf)));
                 }
             }
             catch (const TCPSocket::Interrupted&) {
@@ -940,10 +1209,12 @@ void TCPReceiveServer::process()
                 sock.close();
                 // TODO replace fprintf
                 fprintf(stderr, "TCP Receiver restarted after error: %s\n", e.what());
+                m_queue.push(make_shared<TCPReceiveMessageDisconnected>());
             }
 
             if (num_timeouts > max_num_timeouts) {
                 sock.close();
+                m_queue.push(make_shared<TCPReceiveMessageDisconnected>());
             }
         }
     }
@@ -966,7 +1237,7 @@ TCPSendClient::~TCPSendClient()
     }
 }
 
-void TCPSendClient::sendall(const std::vector<uint8_t>& buffer)
+TCPSendClient::ErrorStats TCPSendClient::sendall(const std::vector<uint8_t>& buffer)
 {
     if (not m_running) {
         throw runtime_error(m_exception_data);
@@ -978,6 +1249,17 @@ void TCPSendClient::sendall(const std::vector<uint8_t>& buffer)
         vector<uint8_t> discard;
         m_queue.try_pop(discard);
     }
+
+    TCPSendClient::ErrorStats es;
+    es.num_reconnects = m_num_reconnects.load();
+
+    es.has_seen_new_errors = es.num_reconnects != m_num_reconnects_prev;
+    m_num_reconnects_prev = es.num_reconnects;
+
+    auto lock = unique_lock<mutex>(m_error_mutex);
+    es.last_error = m_last_error;
+
+    return es;
 }
 
 void TCPSendClient::process()
@@ -999,12 +1281,16 @@ void TCPSendClient::process()
             }
             else {
                 try {
+                    m_num_reconnects.fetch_add(1, std::memory_order_seq_cst);
                     m_sock.connect(m_hostname, m_port);
                     m_is_connected = true;
                 }
                 catch (const runtime_error& e) {
                     m_is_connected = false;
                     this_thread::sleep_for(chrono::seconds(1));
+
+                    auto lock = unique_lock<mutex>(m_error_mutex);
+                    m_last_error = e.what();
                 }
             }
         }

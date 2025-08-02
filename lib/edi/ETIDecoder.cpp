@@ -1,5 +1,5 @@
 /*
-   Copyright (C) 2020
+   Copyright (C) 2024
    Matthias P. Braendli, matthias.braendli@mpb.li
 
    http://opendigitalradio.org
@@ -44,7 +44,7 @@ ETIDecoder::ETIDecoder(ETIDataCollector& data_collector) :
             std::bind(&ETIDecoder::decode_estn, this, _1, _2));
     m_dispatcher.register_tag("*dmy",
             std::bind(&ETIDecoder::decode_stardmy, this, _1, _2));
-    m_dispatcher.register_tagpacket_handler(std::bind(&ETIDecoder::decode_tagpacket, this, _1));
+    m_dispatcher.register_afpacket_handler(std::bind(&ETIDecoder::decode_afpacket, this, _1));
 }
 
 void ETIDecoder::set_verbose(bool verbose)
@@ -69,7 +69,7 @@ void ETIDecoder::setMaxDelay(int num_af_packets)
 
 #define AFPACKET_HEADER_LEN 10 // includes SYNC
 
-bool ETIDecoder::decode_starptr(const std::vector<uint8_t>& value, const tag_name_t& n)
+bool ETIDecoder::decode_starptr(const std::vector<uint8_t>& value, const tag_name_t& /*n*/)
 {
     if (value.size() != 0x40 / 8) {
         etiLog.log(warn, "Incorrect length %02lx for *PTR", value.size());
@@ -89,7 +89,7 @@ bool ETIDecoder::decode_starptr(const std::vector<uint8_t>& value, const tag_nam
     return true;
 }
 
-bool ETIDecoder::decode_deti(const std::vector<uint8_t>& value, const tag_name_t& n)
+bool ETIDecoder::decode_deti(const std::vector<uint8_t>& value, const tag_name_t& /*n*/)
 {
     /*
     uint16_t detiHeader = fct | (fcth << 8) | (rfudf << 13) | (ficf << 14) | (atstf << 15);
@@ -174,7 +174,7 @@ bool ETIDecoder::decode_deti(const std::vector<uint8_t>& value, const tag_name_t
                 fic.begin());
         i += fic_length;
 
-        m_data_collector.update_fic(move(fic));
+        m_data_collector.update_fic(std::move(fic));
     }
 
     if (rfudf) {
@@ -215,7 +215,7 @@ bool ETIDecoder::decode_estn(const std::vector<uint8_t>& value, const tag_name_t
             value.end(),
             back_inserter(stc.mst));
 
-    m_data_collector.add_subchannel(move(stc));
+    m_data_collector.add_subchannel(std::move(stc));
 
     return true;
 }
@@ -225,17 +225,19 @@ bool ETIDecoder::decode_stardmy(const std::vector<uint8_t>&, const tag_name_t&)
     return true;
 }
 
-bool ETIDecoder::decode_tagpacket(const std::vector<uint8_t>& value)
+bool ETIDecoder::decode_afpacket(std::vector<uint8_t>&& value)
 {
-    m_received_tagpacket.tagpacket = value;
+    m_received_tagpacket.afpacket = std::move(value);
     return true;
 }
 
 void ETIDecoder::packet_completed()
 {
+    m_received_tagpacket.seq = m_dispatcher.get_seq_info();
+
     ReceivedTagPacket tp;
     swap(tp, m_received_tagpacket);
-    m_data_collector.assemble(move(tp));
+    m_data_collector.assemble(std::move(tp));
 }
 
 }

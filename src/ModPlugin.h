@@ -32,18 +32,16 @@
 
 #include "Buffer.h"
 #include "ThreadsafeQueue.h"
-#include <cstddef>
+#include "TimestampDecoder.h"
 #include <vector>
-#include <memory>
 #include <thread>
 #include <atomic>
 
 // All flowgraph elements derive from ModPlugin, or a variant of it.
 // Some ModPlugins also support handling metadata.
 
-struct frame_timestamp;
 struct flowgraph_metadata {
-    std::shared_ptr<struct frame_timestamp> ts;
+    frame_timestamp ts;
 };
 
 using meta_vec_t = std::vector<flowgraph_metadata>;

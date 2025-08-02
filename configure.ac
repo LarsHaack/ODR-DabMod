@@ -1,7 +1,7 @@
 # Copyright (C) 2007, 2008, 2009, 2010, 2011, 2012 Her Majesty the
 # Queen in Right of Canada (Communications Research Center Canada)
 
-# Copyright (C) 2020 Matthias P. Braendli, http://opendigitalradio.org
+# Copyright (C) 2025 Matthias P. Braendli, http://opendigitalradio.org
 
 # This file is part of ODR-DabMod.
 #
@@ -18,14 +18,14 @@
 # You should have received a copy of the GNU General Public License
 # along with ODR-DabMod.  If not, see <http://www.gnu.org/licenses/>.
 
-AC_PREREQ(2.69)
-AC_INIT([ODR-DabMod], [2.4.2], [matthias.braendli@mpb.li])
+AC_PREREQ([2.69])
+AC_INIT([ODR-DabMod],[3.0.0],[matthias.braendli@mpb.li])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
-AC_CANONICAL_SYSTEM
+AC_CANONICAL_TARGET
 AM_INIT_AUTOMAKE([-Wall foreign subdir-objects])
 AC_CONFIG_SRCDIR([src/DabMod.cpp])
-AC_CONFIG_HEADER([config.h])
+AC_CONFIG_HEADERS([config.h])
 AM_SILENT_RULES([yes])
 
 # Checks for programs.
@@ -34,7 +34,7 @@ AC_PROG_CC
 AM_PROG_CC_C_O
 AC_PROG_INSTALL
 
-AX_CXX_COMPILE_STDCXX(11,noext,mandatory)
+AX_CXX_COMPILE_STDCXX(17,noext,mandatory)
 
 EXTRA=""
 AC_ARG_ENABLE([prof],
@@ -47,17 +47,20 @@ AC_ARG_ENABLE([trace],
         [AS_HELP_STRING([--enable-trace], [Enable trace output])],
         [], [enable_trace=no])
 AC_ARG_ENABLE([zeromq],
-        [AS_HELP_STRING([--disable-zeromq], [Disable ZeroMQ input, output and remote control])],
+        [AS_HELP_STRING([--disable-zeromq], [Disable ZeroMQ output and remote control])],
         [], [enable_zeromq=yes])
 AC_ARG_ENABLE([native],
         [AS_HELP_STRING([--disable-native], [Do not compile with -march=native])],
         [], [enable_native=yes])
-AC_ARG_ENABLE([easydabv3],
-        [AS_HELP_STRING([--enable-easydabv3], [Build for EasyDABv3 board])],
-        [], [enable_easydabv3=no])
+AC_ARG_ENABLE([dexter],
+        [AS_HELP_STRING([--enable-dexter], [Build for PrecisionWave Dexter board])],
+        [], [enable_dexter=no])
 AC_ARG_ENABLE([limesdr],
         [AS_HELP_STRING([--enable-limesdr], [Build for LimeSDR board])],
         [], [enable_limesdr=no])
+AC_ARG_ENABLE([bladerf],
+        [AS_HELP_STRING([--enable-bladerf], [Build for BladeRF boards])],
+        [], [enable_bladerf=no])
 
 # UHD support control
 AC_ARG_ENABLE([output_uhd],
@@ -74,9 +77,7 @@ AX_CHECK_COMPILE_FLAG([-Wdouble-promotion], [CXXFLAGS="$CXXFLAGS -Wdouble-promot
 AX_CHECK_COMPILE_FLAG(["-Wformat=2"], [CXXFLAGS="$CXXFLAGS -Wformat=2"], [], ["-Werror"])
 AC_LANG_POP([C++])
 
-
-AS_IF([test "x$enable_easydabv3" = "xno"],
-    [PKG_CHECK_MODULES([FFTW], [fftw3f], [], [AC_MSG_ERROR([FFTW is required])])])
+PKG_CHECK_MODULES([FFTW], [fftw3f], [], [AC_MSG_ERROR([FFTW is required])])
 
 echo "Checking zeromq"
 
@@ -98,24 +99,27 @@ AS_IF([test "x$enable_trace" != "xno"],
 
 # Define conditionals for Makefile.am
 AM_CONDITIONAL([IS_GIT_REPO], [test -d '.git'])
-AM_CONDITIONAL([COMPILE_FOR_EASYDABV3], [test "x$enable_easydabv3" = "xyes"])
 
 # Defines for config.h
 AX_PTHREAD([], AC_MSG_ERROR([requires pthread]))
 
-AS_IF([test "x$enable_easydabv3" = "xno"],
-    [PKG_CHECK_MODULES([SOAPYSDR], [SoapySDR], enable_soapysdr=yes, enable_soapysdr=no)])
+PKG_CHECK_MODULES([SOAPYSDR], [SoapySDR], enable_soapysdr=yes, enable_soapysdr=no)
 
 AS_IF([test "x$enable_limesdr" = "xyes"],
          [AC_CHECK_LIB([LimeSuite], [LMS_Init], [LIMESDR_LIBS="-lLimeSuite"],
                        [AC_MSG_ERROR([LimeSDR LimeSuite is required])])])
 
+AS_IF([test "x$enable_dexter" = "xyes"],
+         [AC_CHECK_LIB([iio], [iio_create_scan_context], [IIO_LIBS="-liio"],
+                       [AC_MSG_ERROR([libiio is required])])])
+
+AS_IF([test "x$enable_bladerf" = "xyes"],
+         [AC_CHECK_LIB([bladeRF], [bladerf_open], [BLADERF_LIBS="-lbladeRF"],
+                       [AC_MSG_ERROR([BladeRF library is required])])])
+
 AC_SUBST([CFLAGS], ["$CFLAGS $EXTRA $FFTW_CFLAGS $SOAPYSDR_CFLAGS $PTHREAD_CFLAGS"])
 AC_SUBST([CXXFLAGS], ["$CXXFLAGS $EXTRA $FFTW_CFLAGS $SOAPYSDR_CFLAGS $PTHREAD_CFLAGS"])
-AC_SUBST([LIBS], ["$FFTW_LIBS $SOAPYSDR_LIBS $PTHREAD_LIBS $ZMQ_LIBS $LIMESDR_LIBS"])
-
-AS_IF([test "x$enable_easydabv3" = "xyes" && test "x$enable_output_uhd" == "xyes"],
-      AC_MSG_ERROR([Cannot enable both EasyDABv3 and UHD output]))
+AC_SUBST([LIBS], ["$FFTW_LIBS $SOAPYSDR_LIBS $PTHREAD_LIBS $ZMQ_LIBS $LIMESDR_LIBS $IIO_LIBS $BLADERF_LIBS"])
 
 # Checks for UHD.
 AS_IF([test "x$enable_output_uhd" = "xyes"],
@@ -135,14 +139,16 @@ AS_IF([test "x$enable_soapysdr" = "xyes"],
       [AC_DEFINE(HAVE_SOAPYSDR, [1], [Define if SoapySDR output is enabled])])
 
 AS_IF([test "x$enable_limesdr" = "xyes"],
-      [AC_DEFINE(HAVE_LIMESDR, [1], [Define if LimeSDR input is enabled]) ])
+      [AC_DEFINE(HAVE_LIMESDR, [1], [Define if LimeSDR output is enabled]) ])
 
-AS_IF([test "x$enable_easydabv3" = "xyes"],
-      AC_DEFINE(BUILD_FOR_EASYDABV3, [1], [Define if we are building for EasyDABv3]))
+AS_IF([test "x$enable_dexter" = "xyes"],
+      [AC_DEFINE(HAVE_DEXTER, [1], [Define if Dexter output is enabled])])
+
+AS_IF([test "x$enable_bladerf" = "xyes"],
+      [AC_DEFINE(HAVE_BLADERF, [1], [Define if BladeRF output is enabled]) ])
 
 
 # Checks for header files.
-AC_HEADER_STDC
 AC_CHECK_HEADERS([fcntl.h limits.h memory.h netinet/in.h stdint.h stdlib.h string.h sys/time.h sys/timeb.h unistd.h])
 
 AC_MSG_CHECKING(for M_PIl existence)
@@ -208,7 +214,7 @@ echo "***********************************************"
 echo
 enabled=""
 disabled=""
-for feat in prof trace output_uhd zeromq soapysdr easydabv3 limesdr
+for feat in prof trace output_uhd zeromq soapysdr limesdr bladerf dexter
 do
     eval var=\$enable_$feat
     AS_IF([test "x$var" = "xyes"],
